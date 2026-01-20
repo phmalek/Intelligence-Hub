@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weekly Longlist Dashboard</title>
+  <style>
+    :root {
+      --bg: #f6f2e9;
+      --panel: #ffffff;
+      --ink: #1e1b16;
+      --accent: #c96b2c;
+      --muted: #6b6258;
+    }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: radial-gradient(circle at 10% 20%, #f0e7db 0%, #f6f2e9 55%, #efe3d2 100%);
+      color: var(--ink);
+    }
+    header {
+      padding: 24px 32px 8px;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 28px;
+      letter-spacing: 0.5px;
+    }
+    .sub {
+      color: var(--muted);
+      margin: 0 0 16px;
+      font-size: 14px;
+    }
+    .container {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 20px;
+      padding: 0 32px 32px;
+    }
+    .panel {
+      background: var(--panel);
+      border-radius: 16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.06);
+      padding: 16px;
+    }
+    .filters label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin: 12px 0 4px;
+    }
+    .filters select {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid #d3c9bb;
+      background: #fffaf3;
+      font-size: 14px;
+    }
+    .chart-title {
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    .chart {
+      width: 100%;
+      height: 420px;
+    }
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      margin-top: 12px;
+    }
+    .table th, .table td {
+      text-align: left;
+      padding: 6px 8px;
+      border-bottom: 1px solid #efe6d8;
+    }
+    .table th {
+      position: sticky;
+      top: 0;
+      background: #fffaf3;
+      z-index: 1;
+    }
+    .hint {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 8px;
+    }
+    @media (max-width: 960px) {
+      .container {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Weekly Longlist Dashboard</h1>
+    <p class="sub">Data source: weekly_longlist_all.csv</p>
+  </header>
+  <div class="container">
+    <div class="panel filters">
+      <label for="week">Week</label>
+      <select id="week"></select>
+
+      <label for="section">Section</label>
+      <select id="section"></select>
+
+      <label for="metric">Metric</label>
+      <select id="metric"></select>
+
+      <label for="rows">Top rows</label>
+      <select id="rows">
+        <option value="10">10</option>
+        <option value="20" selected>20</option>
+        <option value="50">50</option>
+      </select>
+
+      <p class="hint">Tip: use the table for exact values and the chart for quick comparisons.</p>
+    </div>
+    <div class="panel">
+      <div class="chart-title" id="chartTitle">Loading...</div>
+      <svg class="chart" id="chart" viewBox="0 0 800 420" preserveAspectRatio="xMidYMid meet"></svg>
+      <table class="table" id="dataTable">
+        <thead>
+          <tr>
+            <th>Row Label</th>
+            <th>Value</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const csvUrl = '../weekly_longlist_all.csv';
+
+    function parseCsv(text) {
+      const lines = text.split(/\r?\n/).filter(Boolean);
+      if (!lines.length) return [];
+      const headers = lines[0].split(',').map(h => h.trim());
+      return lines.slice(1).map(line => {
+        const cells = [];
+        let current = '';
+        let inQuotes = false;
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i];
+          if (ch === '"') {
+            if (inQuotes && line[i + 1] === '"') {
+              current += '"';
+              i++;
+            } else {
+              inQuotes = !inQuotes;
+            }
+          } else if (ch === ',' && !inQuotes) {
+            cells.push(current);
+            current = '';
+          } else {
+            current += ch;
+          }
+        }
+        cells.push(current);
+        const row = {};
+        headers.forEach((h, idx) => {
+          row[h] = cells[idx] !== undefined ? cells[idx] : '';
+        });
+        return row;
+      });
+    }
+
+    function uniqueSorted(values) {
+      return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
+    }
+
+    function formatValue(value) {
+      const num = Number(value);
+      if (Number.isNaN(num)) return value;
+      return num.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    }
+
+    function buildChart(data, topN) {
+      const svg = document.getElementById('chart');
+      svg.innerHTML = '';
+      const width = 800;
+      const height = 420;
+      const padding = { top: 20, right: 40, bottom: 60, left: 200 };
+      const innerWidth = width - padding.left - padding.right;
+      const innerHeight = height - padding.top - padding.bottom;
+
+      const rows = data
+        .map(item => ({ label: item.row_label, value: Number(item.value) }))
+        .filter(item => !Number.isNaN(item.value))
+        .sort((a, b) => b.value - a.value)
+        .slice(0, topN);
+
+      const maxValue = Math.max(1, ...rows.map(r => r.value));
+
+      rows.forEach((row, idx) => {
+        const barHeight = innerHeight / rows.length * 0.7;
+        const y = padding.top + idx * (innerHeight / rows.length);
+        const barWidth = (row.value / maxValue) * innerWidth;
+
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', padding.left);
+        rect.setAttribute('y', y);
+        rect.setAttribute('width', barWidth);
+        rect.setAttribute('height', barHeight);
+        rect.setAttribute('fill', '#c96b2c');
+        svg.appendChild(rect);
+
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('x', 10);
+        label.setAttribute('y', y + barHeight * 0.75);
+        label.setAttribute('fill', '#1e1b16');
+        label.setAttribute('font-size', '12');
+        label.textContent = row.label;
+        svg.appendChild(label);
+
+        const valueLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        valueLabel.setAttribute('x', padding.left + barWidth + 8);
+        valueLabel.setAttribute('y', y + barHeight * 0.75);
+        valueLabel.setAttribute('fill', '#6b6258');
+        valueLabel.setAttribute('font-size', '12');
+        valueLabel.textContent = formatValue(row.value);
+        svg.appendChild(valueLabel);
+      });
+    }
+
+    function buildTable(data, topN) {
+      const tbody = document.querySelector('#dataTable tbody');
+      tbody.innerHTML = '';
+      const rows = data
+        .map(item => ({ label: item.row_label, value: Number(item.value) }))
+        .filter(item => !Number.isNaN(item.value))
+        .sort((a, b) => b.value - a.value)
+        .slice(0, topN);
+
+      rows.forEach(row => {
+        const tr = document.createElement('tr');
+        const tdLabel = document.createElement('td');
+        tdLabel.textContent = row.label;
+        const tdValue = document.createElement('td');
+        tdValue.textContent = formatValue(row.value);
+        tr.appendChild(tdLabel);
+        tr.appendChild(tdValue);
+        tbody.appendChild(tr);
+      });
+    }
+
+    function updateDashboard(dataset) {
+      const weekSelect = document.getElementById('week');
+      const sectionSelect = document.getElementById('section');
+      const metricSelect = document.getElementById('metric');
+      const rowsSelect = document.getElementById('rows');
+
+      const week = weekSelect.value;
+      const section = sectionSelect.value;
+      const metric = metricSelect.value;
+      const topN = Number(rowsSelect.value);
+
+      const filtered = dataset.filter(item =>
+        item.week === week && item.section === section && item.metric === metric
+      );
+
+      document.getElementById('chartTitle').textContent = `${metric} | ${section} | ${week}`;
+      buildChart(filtered, topN);
+      buildTable(filtered, topN);
+    }
+
+    function populateFilters(dataset) {
+      const weekSelect = document.getElementById('week');
+      const sectionSelect = document.getElementById('section');
+      const metricSelect = document.getElementById('metric');
+
+      uniqueSorted(dataset.map(item => item.week)).forEach(week => {
+        const opt = document.createElement('option');
+        opt.value = week;
+        opt.textContent = week;
+        weekSelect.appendChild(opt);
+      });
+
+      uniqueSorted(dataset.map(item => item.section)).forEach(section => {
+        const opt = document.createElement('option');
+        opt.value = section;
+        opt.textContent = section;
+        sectionSelect.appendChild(opt);
+      });
+
+      uniqueSorted(dataset.map(item => item.metric)).forEach(metric => {
+        const opt = document.createElement('option');
+        opt.value = metric;
+        opt.textContent = metric;
+        metricSelect.appendChild(opt);
+      });
+
+      weekSelect.selectedIndex = weekSelect.options.length - 1;
+      sectionSelect.selectedIndex = 0;
+      metricSelect.selectedIndex = 0;
+
+      ['week', 'section', 'metric', 'rows'].forEach(id => {
+        document.getElementById(id).addEventListener('change', () => updateDashboard(dataset));
+      });
+
+      updateDashboard(dataset);
+    }
+
+    fetch(csvUrl)
+      .then(response => response.text())
+      .then(text => {
+        const data = parseCsv(text).filter(row => row.value !== '');
+        populateFilters(data);
+      })
+      .catch(error => {
+        document.getElementById('chartTitle').textContent = 'Failed to load CSV';
+        console.error(error);
+      });
+  </script>
+</body>
+</html>
