@@ -1,0 +1,22 @@
+.DS_Store
+.idea/
+.vscode/
+
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.ipynb_checkpoints/
+
+venv/
+.venv/
+build/
+dist/
+*.log
+
+pwc reports/Weekly/
+pwc reports/**/~$*
