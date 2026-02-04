@@ -2,6 +2,9 @@
 .idea/
 .vscode/
 
+.env
+.env.*
+
 __pycache__/
 *.py[cod]
 *.so
@@ -14,9 +17,15 @@ __pycache__/
 
 venv/
 .venv/
+.venv311/
 build/
 dist/
 *.log
+pandasai.log
+cache/
+exports/
 
 pwc reports/Weekly/
+pwc reports/Annual/
+pwc reports/WIP/
 pwc reports/**/~$*

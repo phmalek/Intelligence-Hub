@@ -1,13 +1,17 @@
 from io import BytesIO
 from pathlib import Path
 import os
+import re
+from datetime import datetime
+from typing import Optional
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 from dotenv import load_dotenv
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 try:
     from openai import OpenAI
@@ -38,14 +42,7 @@ load_dotenv()
 @st.cache_data
 def load_data(csv_path: Path, mtime: float):
     df = pd.read_csv(csv_path, low_memory=False)
-    df['report_date'] = pd.to_datetime(df.get('report_date'), errors='coerce')
-    if 'Date' in df.columns:
-        df['Date'] = pd.to_datetime(df['Date'].astype(str), format='%Y%m%d', errors='coerce')
-    df['report_week'] = df.get('report_week', pd.Series(dtype=str)).astype(str).str.strip()
-    for col in ['Media Spend', 'Number of Sessions', 'DCFS', 'Forms Submission Started']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-    return df
+    return normalize_data(df)
 
 
 @st.cache_data
@@ -65,6 +62,172 @@ def load_s50_lookup(csv_path: Path, mtime: float):
 
     lookup = lookup[join_cols + ['s50_spend']].copy()
     return lookup, join_cols
+
+
+def normalize_data(df: pd.DataFrame) -> pd.DataFrame:
+    df['report_date'] = pd.to_datetime(df.get('report_date'), errors='coerce')
+    if 'Date' in df.columns:
+        date_series = df['Date']
+        if pd.api.types.is_datetime64_any_dtype(date_series):
+            df['Date'] = date_series
+        else:
+            date_str = date_series.astype(str).str.strip()
+            date_str = date_str.str.replace(r'\.0$', '', regex=True)
+            date_ymd = date_str.where(date_str.str.match(r'^\d{8}$', na=False))
+            parsed = pd.to_datetime(date_ymd, format='%Y%m%d', errors='coerce')
+            parsed_fallback = pd.to_datetime(date_str, errors='coerce')
+            df['Date'] = parsed.fillna(parsed_fallback)
+    df['report_week'] = df.get('report_week', pd.Series(dtype=str)).astype(str).str.strip()
+    report_week_clean = df['report_week'].replace({'nan': '', 'None': ''}).fillna('')
+    report_week_clean = report_week_clean.str.upper().str.replace(' ', '', regex=False)
+
+    report_date = df['report_date']
+    iso = report_date.dt.isocalendar()
+    iso_year = iso['year']
+    iso_week = iso['week']
+
+    week_match = report_week_clean.str.extract(r'CW(\d{1,2})', expand=False)
+    week_num = pd.to_numeric(week_match, errors='coerce')
+
+    df['report_cw'] = week_num
+    df['report_cw_year'] = pd.Series(pd.NA, index=df.index, dtype='Int64')
+    date_has_week = report_date.notna()
+    df.loc[date_has_week, 'report_cw'] = df.loc[date_has_week, 'report_cw'].fillna(iso_week)
+    df.loc[date_has_week, 'report_cw_year'] = iso_year.where(date_has_week)
+
+    df['report_week_key'] = pd.Series(pd.NA, index=df.index, dtype='string')
+    has_cw = df['report_cw'].notna() & df['report_cw_year'].notna()
+    df.loc[has_cw, 'report_week_key'] = (
+        df.loc[has_cw, 'report_cw_year'].astype(int).astype(str)
+        + '-CW'
+        + df.loc[has_cw, 'report_cw'].astype(int).astype(str).str.zfill(2)
+    )
+    df['report_week_sort'] = pd.Series(pd.NA, index=df.index, dtype='Int64')
+    df.loc[has_cw, 'report_week_sort'] = (
+        df.loc[has_cw, 'report_cw_year'].astype(int) * 100
+        + df.loc[has_cw, 'report_cw'].astype(int)
+    )
+
+    if 'Date' in df.columns:
+        date_base = df['Date']
+        valid_date = date_base.notna()
+        date_iso = date_base.dt.isocalendar()
+        date_week = date_iso['week']
+        date_year = date_iso['year']
+        df['calendar_week'] = df.get('calendar_week', pd.Series(dtype=object))
+        df.loc[valid_date, 'calendar_week'] = (
+            date_year[valid_date].astype(int).astype(str)
+            + '-CW'
+            + date_week[valid_date].astype(int).astype(str).str.zfill(2)
+        )
+        df['calendar_week_sort'] = df.get('calendar_week_sort', pd.Series(dtype='Int64'))
+        df.loc[valid_date, 'calendar_week_sort'] = (
+            date_year[valid_date].astype(int) * 100
+            + date_week[valid_date].astype(int)
+        )
+
+        week_start = date_base - pd.to_timedelta(date_base.dt.weekday, unit='D')
+        week_end = week_start + pd.Timedelta(days=6)
+
+        def _format_range(start, end):
+            return f'{start.strftime("%B")} {start.day} - {end.strftime("%B")} {end.day}'
+
+        df['week_text'] = df.get('week_text', pd.Series(dtype=object))
+        df.loc[valid_date, 'week_text'] = [
+            _format_range(start, end)
+            for start, end in zip(week_start[valid_date], week_end[valid_date])
+        ]
+
+        unique_starts = sorted(week_start[valid_date].dropna().unique())
+        week_index = {start: idx + 1 for idx, start in enumerate(unique_starts)}
+        df['week_relative'] = df.get('week_relative', pd.Series(dtype=object))
+        df.loc[valid_date, 'week_relative'] = (
+            'BW '
+            + week_start[valid_date].map(week_index).astype(int).astype(str)
+        )
+    for col in ['Media Spend', 'Number of Sessions', 'DCFS', 'Forms Submission Started', 'Impressions']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    return df
+
+
+def get_calendar_week_options(df_in: pd.DataFrame) -> list:
+    if 'calendar_week' not in df_in.columns:
+        return []
+    if 'calendar_week_sort' in df_in.columns:
+        tmp = df_in[['calendar_week', 'calendar_week_sort']].dropna()
+        if not tmp.empty:
+            return (
+                tmp.sort_values('calendar_week_sort')
+                .drop_duplicates('calendar_week')['calendar_week']
+                .tolist()
+            )
+    return sorted(df_in['calendar_week'].dropna().unique())
+
+
+_DATE_RE = re.compile(r'^(\d{8})_')
+_CW_RE = re.compile(r'\bCW\s*\d+\b', re.IGNORECASE)
+
+
+def _parse_date_prefix(filename: str) -> Optional[str]:
+    match = _DATE_RE.match(filename)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), '%d%m%Y').strftime('%Y-%m-%d')
+    except ValueError:
+        return None
+
+
+def _parse_report_week(text: str) -> str:
+    match = _CW_RE.search(text or '')
+    return match.group(0).replace(' ', '') if match else ''
+
+
+def _find_python_output_sheet(wb):
+    for name in wb.sheetnames:
+        if re.search(r'python output', name, re.IGNORECASE):
+            return name
+    return None
+
+
+@st.cache_data
+def load_excel_python_output(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    wb = load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+    sheet_name = _find_python_output_sheet(wb)
+    if not sheet_name:
+        wb.close()
+        raise ValueError('Python Output sheet not found.')
+    ws = wb[sheet_name]
+
+    rows = []
+    for row in ws.iter_rows(values_only=True):
+        if any(cell is not None and cell != '' for cell in row):
+            rows.append(row)
+    wb.close()
+
+    if not rows:
+        raise ValueError('Python Output sheet is empty.')
+
+    header = [str(col).strip() if col is not None else '' for col in rows[0]]
+    report_date = _parse_date_prefix(filename)
+    report_week = _parse_report_week(filename)
+    source_file = filename
+
+    out_rows = []
+    for row in rows[1:]:
+        values = [row[idx] if idx < len(row) else None for idx in range(len(header))]
+        out_rows.append([report_date, report_week, source_file] + values)
+
+    df = pd.DataFrame(out_rows, columns=['report_date', 'report_week', 'source_file'] + header)
+    return normalize_data(df)
+
+
+def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Python Output (cleaned)')
+    return output.getvalue()
 
 
 def _pdf_escape(text: str) -> str:
@@ -296,7 +459,34 @@ def _run_final_conclusion(reports: dict) -> str:
     )
     return response.choices[0].message.content
 
-df = load_data(CSV_PATH, CSV_PATH.stat().st_mtime)
+with st.sidebar:
+    st.header('Data Ingestion')
+    uploaded_excel = st.file_uploader(
+        'Upload weekly Excel (Python Output sheet)',
+        type=['xlsx'],
+    )
+
+data_source_label = f'CSV: {CSV_PATH.name}'
+if uploaded_excel is not None:
+    try:
+        df = load_excel_python_output(uploaded_excel.getvalue(), uploaded_excel.name)
+        data_source_label = f'Uploaded Excel: {uploaded_excel.name}'
+    except Exception as exc:
+        st.error(f'Unable to read the uploaded Excel file: {exc}')
+        st.stop()
+else:
+    st.info('Upload a weekly Excel file to load the dashboard.')
+    st.stop()
+
+with st.sidebar.expander('Data diagnostics'):
+    if 'Date' in df.columns:
+        st.write('Date min:', df['Date'].min())
+        st.write('Date max:', df['Date'].max())
+    if 'calendar_week' in df.columns:
+        week_list = get_calendar_week_options(df)
+        st.write('Calendar weeks:', week_list[:5], '...', week_list[-5:])
+        st.write('Total weeks:', len(week_list))
+
 s50_lookup, s50_join_cols = load_s50_lookup(
     S50_LOOKUP_PATH, S50_LOOKUP_PATH.stat().st_mtime if S50_LOOKUP_PATH.exists() else 0
 )
@@ -307,6 +497,7 @@ if not s50_lookup.empty and s50_join_cols:
         df = df.drop(columns=['s50_spend_lookup'])
 
 st.title('Close The Gap Dashboard')
+st.caption(f'Data source: {data_source_label}')
 
 numeric_cols = df.select_dtypes(include='number').columns.tolist()
 numeric_cols = [col for col in numeric_cols if col not in {'Date'}]
@@ -318,6 +509,13 @@ categorical_cols = [
     ]
     if col in df.columns
 ]
+
+dual_selections = {}
+dual_breakdown_dim = None
+dual_aggregate = False
+dual_aggregate_dims = {}
+dual_left_kpi = None
+dual_right_kpi = None
 
 def _label_value(value):
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -495,29 +693,64 @@ with st.sidebar:
         ['Overview', 'Risk Analysis', 'Market CPL', 'Market Report - Excel Export', 'KPI vs Investment'],
         horizontal=True,
     )
-    st.header('Filters')
     if page == 'Overview':
-        metric = st.selectbox('Metric', numeric_cols)
-        agg_func = st.selectbox('Aggregate', ['sum', 'mean', 'median'])
-    else:
+        st.header('Plot Filters')
+        st.caption('All includes every value. Use Aggregate to combine into one series.')
+        dimension_candidates = [
+            ('Market', 'Market'),
+            ('Model', 'Model'),
+            ('Campaign', 'Campaign'),
+            ('Channel', 'Channel'),
+            ('Platform', 'Platform'),
+            ('Activation Group', 'Activation Group'),
+        ]
+        for label, col in dimension_candidates:
+            if col in df.columns:
+                options = ['All'] + sorted(df[col].dropna().unique())
+                dual_selections[col] = st.multiselect(f'{label}', options, default=['All'])
+
+        for label, col in dimension_candidates:
+            if col in df.columns:
+                dual_aggregate_dims[col] = st.checkbox(f'Aggregate {label}', value=False)
+
+        breakdown_dims = [
+            col
+            for col, selections in dual_selections.items()
+            if selections and not dual_aggregate_dims.get(col, False)
+        ]
+        dual_breakdown_dim = breakdown_dims
+
+        base_kpis = numeric_cols.copy()
+        extra_kpis = [
+            'Cost per Lead (Forms Submission Started)',
+            'Cost per Lead (DCFS)',
+            'CPM',
+        ]
+        kpi_choices = [k for k in base_kpis if k not in extra_kpis] + extra_kpis
+        dual_left_kpi = st.selectbox('Left axis KPI', kpi_choices, index=0)
+        compare_kpis = st.checkbox('Compare (add right axis)', value=True)
+        if compare_kpis:
+            dual_right_kpi = st.selectbox('Right axis KPI', kpi_choices, index=min(7, len(kpi_choices) - 1))
+        else:
+            dual_right_kpi = None
+
         metric = None
         agg_func = None
-
-    if page in {'Overview', 'Market CPL'}:
+        filtered = df
+        model_df = None
+        market = None
+        campaign = None
+        top_n = None
+        export_market = None
+        export_weeks = None
+    elif page == 'Market CPL':
+        st.header('Filters')
         if 'Model' not in df.columns:
             st.warning('Model column not found in the dataset.')
             st.stop()
 
-        if page == 'Overview':
-            if 'Market' not in df.columns:
-                st.warning('Market column not found in the dataset.')
-                st.stop()
-            market_options = ['All'] + sorted(df['Market'].dropna().unique())
-            market = st.selectbox('Market', market_options)
-            base_df = df if market == 'All' else df[df['Market'] == market]
-        else:
-            market = None
-            base_df = df
+        market = None
+        base_df = df
 
         model_options = ['All'] + sorted(base_df['Model'].dropna().unique())
         if not model_options:
@@ -539,13 +772,13 @@ with st.sidebar:
             st.warning('No data available for the current filters.')
             st.stop()
 
-        if page == 'Overview':
-            top_n = st.slider('Top N series', 5, 30, 10)
-        else:
-            top_n = None
+        metric = None
+        agg_func = None
+        top_n = None
         export_market = None
         export_weeks = None
     elif page == 'Market Report - Excel Export':
+        st.header('Filters')
         if 'Market' not in df.columns:
             st.warning('Market column not found in the dataset.')
             st.stop()
@@ -555,7 +788,7 @@ with st.sidebar:
             campaign_options += sorted(df['Campaign'].dropna().unique())
         export_campaign = st.selectbox('Campaign', campaign_options)
         date_mode = st.radio('Filter by', ['Weeks', 'Date range'], horizontal=True)
-        week_options = sorted(df['calendar_week'].dropna().unique()) if 'calendar_week' in df.columns else []
+        week_options = get_calendar_week_options(df)
         week_choices = ['All'] + week_options
         export_weeks = st.multiselect('Weeks', week_choices, default=['All'], disabled=date_mode == 'Date range')
         export_dates = None
@@ -1341,7 +1574,7 @@ if page == 'Market CPL':
         if col not in df.columns:
             required[key] = None
 
-    week_options = sorted(df['calendar_week'].dropna().unique()) if 'calendar_week' in df.columns else []
+    week_options = get_calendar_week_options(df)
     week_choices = ['All'] + week_options
     selected_weeks = st.multiselect('Weeks', week_choices, default=['All'])
 
@@ -1783,202 +2016,118 @@ if page == 'KPI vs Investment':
     st.dataframe(plot_df)
     st.stop()
 
-x_axis = 'calendar_week'
-platform_col = 'Platform' if 'Platform' in filtered.columns else None
+if page == 'Overview':
+    st.subheader('Dual KPI chart')
+    dual_base = df.copy()
+    breakdown_dims = dual_breakdown_dim or []
 
-platform_group = [x_axis, platform_col] if platform_col else [x_axis]
-platform_agg = (
-    filtered.groupby(platform_group, dropna=False)[metric]
-    .agg(agg_func)
-    .reset_index()
-)
+    for col, selections in dual_selections.items():
+        if not selections:
+            continue
+        if 'All' in selections:
+            continue
+        value_selections = [s for s in selections if s != 'All']
+        if value_selections:
+            dual_base = dual_base[dual_base[col].isin(value_selections)]
 
-total_agg = (
-    filtered.groupby([x_axis], dropna=False)[metric]
-    .agg(agg_func)
-    .reset_index()
-)
+    if dual_base.empty:
+        st.warning('No data available for the selected filters.')
+        st.stop()
 
-st.subheader(f'{metric} by platform | {market} | {model}')
-if platform_col:
-    top_platforms = (
-        platform_agg.groupby(platform_col, dropna=False)[metric]
-        .sum()
-        .sort_values(ascending=False)
-        .head(top_n)
-        .index
-        .tolist()
-    )
-    plot_platform = platform_agg[platform_agg[platform_col].isin(top_platforms)]
-    line_fig = px.line(
-        plot_platform,
-        x=x_axis,
-        y=metric,
-        color=platform_col,
-        markers=True,
-        labels={x_axis: 'Date' if x_axis == 'Date' else 'Calendar Week', metric: metric},
-    )
-    line_fig.update_layout(height=450, legend_title_text=platform_col)
-    st.plotly_chart(line_fig, use_container_width=True)
-else:
-    st.info('Platform column not available in this dataset.')
+    left_kpi = dual_left_kpi or (numeric_cols[0] if numeric_cols else None)
+    right_kpi = dual_right_kpi
 
-st.subheader(f'Total (all platforms) | {market} | {model}')
-total_fig = px.line(
-    total_agg,
-    x=x_axis,
-    y=metric,
-    markers=True,
-    labels={x_axis: 'Date' if x_axis == 'Date' else 'Calendar Week', metric: metric},
-)
-total_fig.update_layout(height=300)
-st.plotly_chart(total_fig, use_container_width=True)
+    group_cols = ['calendar_week'] + breakdown_dims
 
-st.subheader('Platform totals')
-if platform_col:
-    totals_table = (
-        platform_agg.groupby(platform_col, dropna=False)[metric]
-        .sum()
-        .sort_values(ascending=False)
-        .reset_index()
-    )
-    st.dataframe(totals_table)
-else:
-    st.dataframe(total_agg)
+    agg_spec = {}
+    for col in numeric_cols:
+        if col in dual_base.columns:
+            agg_spec[col] = 'sum'
 
-st.subheader('KPI trends')
+    weekly = dual_base.groupby(group_cols, dropna=False).agg(agg_spec).reset_index()
 
-kpi_options = [
-    'Media Invest',
-    'Visits (Sessions)',
-    'Dealer Contract Form Submissions',
-    'Sessions to DCFS Conversion Rate',
-    'Cost per Lead',
-    'Lead to Sales Rate',
-]
-kpi = st.selectbox('KPI', kpi_options)
-series_mode = st.selectbox('Series', ['Total (all platforms)', 'By platform'])
+    def _compute_kpi(frame, label):
+        if label in frame.columns:
+            return frame[label]
+        if label == 'Cost per Lead (Forms Submission Started)':
+            return frame.apply(lambda r: _safe_ratio(r['Media Spend'], r['Forms Submission Started']), axis=1)
+        if label == 'Cost per Lead (DCFS)':
+            return frame.apply(lambda r: _safe_ratio(r['Media Spend'], r['DCFS']), axis=1)
+        if label == 'CPM':
+            if 'Impressions' not in frame.columns:
+                return pd.Series([None] * len(frame))
+            return frame.apply(
+                lambda r: (_safe_ratio(r['Media Spend'], r['Impressions']) or 0) * 1000
+                if _safe_ratio(r['Media Spend'], r['Impressions']) is not None
+                else None,
+                axis=1,
+            )
+        return pd.Series([None] * len(frame))
 
-required_cols = {
-    'media': 'Media Spend',
-    'sessions': 'Number of Sessions',
-    'dcfs': 'DCFS',
-    'forms': 'Forms Submission Started',
-}
+    weekly['left_kpi'] = _compute_kpi(weekly, left_kpi)
+    if right_kpi:
+        weekly['right_kpi'] = _compute_kpi(weekly, right_kpi)
 
-for key, col in required_cols.items():
-    if col not in filtered.columns:
-        required_cols[key] = None
+    week_order = get_calendar_week_options(dual_base)
+    fig = make_subplots(specs=[[{"secondary_y": bool(right_kpi)}]])
 
-sales_col = 'Sales (OGR)' if 'Sales (OGR)' in filtered.columns else None
-
-group_cols = [x_axis]
-if series_mode == 'By platform' and platform_col:
-    group_cols.append(platform_col)
-
-base = (
-    filtered.groupby(group_cols, dropna=False)
-    .agg({
-        'Media Spend': 'sum',
-        'Number of Sessions': 'sum',
-        'DCFS': 'sum',
-        'Forms Submission Started': 'sum',
-        **({sales_col: 'sum'} if sales_col else {}),
-    })
-    .reset_index()
-)
-
-def safe_ratio(numerator, denominator):
-    return numerator / denominator if denominator and denominator != 0 else None
-
-if kpi == 'Media Invest':
-    base['kpi_value'] = base['Media Spend']
-elif kpi == 'Visits (Sessions)':
-    base['kpi_value'] = base['Number of Sessions']
-elif kpi == 'Dealer Contract Form Submissions':
-    base['kpi_value'] = base['Forms Submission Started']
-elif kpi == 'Sessions to DCFS Conversion Rate':
-    base['kpi_value'] = base.apply(lambda r: safe_ratio(r['DCFS'], r['Number of Sessions']), axis=1)
-elif kpi == 'Cost per Lead':
-    base['kpi_value'] = base.apply(lambda r: safe_ratio(r['Media Spend'], r['Forms Submission Started']), axis=1)
-elif kpi == 'Lead to Sales Rate':
-    if sales_col:
-        base['kpi_value'] = base.apply(lambda r: safe_ratio(r[sales_col], r['Forms Submission Started']), axis=1)
-    else:
-        base['kpi_value'] = None
-
-if series_mode == 'By platform' and platform_col:
-    kpi_fig = px.line(
-        base,
-        x=x_axis,
-        y='kpi_value',
-        color=platform_col,
-        markers=True,
-        labels={x_axis: 'Date' if x_axis == 'Date' else 'Calendar Week', 'kpi_value': kpi},
-    )
-    kpi_fig.update_layout(height=420, legend_title_text=platform_col)
-else:
-    kpi_fig = px.line(
-        base,
-        x=x_axis,
-        y='kpi_value',
-        markers=True,
-        labels={x_axis: 'Date' if x_axis == 'Date' else 'Calendar Week', 'kpi_value': kpi},
-    )
-    kpi_fig.update_layout(height=320)
-
-st.plotly_chart(kpi_fig, use_container_width=True)
-
-st.subheader('KPI summary table')
-
-kpi_groupby = st.multiselect(
-    'KPI group by',
-    categorical_cols,
-    default=['Market', 'Model', 'Channel', 'Platform', 'Activation Group'],
-)
-
-
-def safe_div(numerator, denominator):
-    return numerator / denominator if denominator and denominator != 0 else None
-
-
-def compute_kpis(df_in, groupby_cols):
-    group_cols = groupby_cols if groupby_cols else []
-    grouped = df_in.groupby(group_cols, dropna=False) if group_cols else [((), df_in)]
-
-    rows = []
-    for key, data in grouped:
-        if not isinstance(key, tuple):
-            key = (key,)
-        row = dict(zip(group_cols, key)) if group_cols else {}
-
-        media_invest = data['Media Spend'].sum() if 'Media Spend' in data else None
-        visits = data['Number of Sessions'].sum() if 'Number of Sessions' in data else None
-        dcfs = data['DCFS'].sum() if 'DCFS' in data else None
-        forms = data['Forms Submission Started'].sum() if 'Forms Submission Started' in data else None
-
-        row['Media Invest'] = media_invest
-        row['Visits (Sessions)'] = visits
-        row['Dealer Contract Form Submissions'] = forms
-        row['Sessions to DCFS Conversion Rate'] = safe_div(dcfs, visits)
-        row['Cost per Lead'] = safe_div(media_invest, forms)
-
-        if 'Sales (OGR)' in data:
-            sales = data['Sales (OGR)'].sum()
-            row['Lead to Sales Rate'] = safe_div(sales, forms)
-            if 'Date' in data:
-                aug_mask = data['Date'].dt.strftime('%Y-%m') == '2025-08'
-                row["Sales (OGR) as of Aug'25"] = data.loc[aug_mask, 'Sales (OGR)'].sum()
+    if breakdown_dims:
+        palette = px.colors.qualitative.Plotly
+        for idx, (key, group) in enumerate(weekly.groupby(breakdown_dims, dropna=False)):
+            color = palette[idx % len(palette)]
+            if isinstance(key, tuple):
+                parts = [str(part) if part not in [None, ''] else 'Not specified' for part in key]
+                name = ' | '.join(parts)
             else:
-                row["Sales (OGR) as of Aug'25"] = None
-        else:
-            row['Lead to Sales Rate'] = None
-            row["Sales (OGR) as of Aug'25"] = None
-
-        rows.append(row)
-
-    return pd.DataFrame(rows)
-
-
-kpi_table = compute_kpis(filtered, kpi_groupby)
-st.dataframe(kpi_table)
+                name = str(key) if key not in [None, ''] else 'Not specified'
+            fig.add_trace(
+                go.Scatter(
+                    x=group['calendar_week'],
+                    y=group['left_kpi'],
+                    mode='lines+markers',
+                    name=f'{name} — {left_kpi}',
+                    line=dict(color=color),
+                ),
+                secondary_y=False,
+            )
+            if right_kpi:
+                fig.add_trace(
+                    go.Scatter(
+                        x=group['calendar_week'],
+                        y=group['right_kpi'],
+                        mode='lines+markers',
+                        name=f'{name} — {right_kpi}',
+                        line=dict(color=color, dash='dash'),
+                    ),
+                    secondary_y=True,
+                )
+    else:
+        fig.add_trace(
+            go.Scatter(
+                x=weekly['calendar_week'],
+                y=weekly['left_kpi'],
+                mode='lines+markers',
+                name=left_kpi,
+            ),
+            secondary_y=False,
+        )
+        if right_kpi:
+            fig.add_trace(
+                go.Scatter(
+                    x=weekly['calendar_week'],
+                    y=weekly['right_kpi'],
+                    mode='lines+markers',
+                    name=right_kpi,
+                    line=dict(dash='dash'),
+                ),
+                secondary_y=True,
+            )
+    fig.update_layout(
+        height=420,
+        xaxis=dict(categoryorder='array', categoryarray=week_order),
+        legend_title_text='KPI',
+    )
+    fig.update_yaxes(title_text=left_kpi, secondary_y=False)
+    if right_kpi:
+        fig.update_yaxes(title_text=right_kpi, secondary_y=True)
+    st.plotly_chart(fig, use_container_width=True)
