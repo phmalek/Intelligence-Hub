@@ -19,10 +19,7 @@ try:
 except Exception:
     OpenAI = None
 
-try:
-    from opportunity import OPPORTUNITY_CONFIG, compute_headroom_scores
-except ImportError:
-    from dashboard_python_output.opportunity import OPPORTUNITY_CONFIG, compute_headroom_scores
+from opportunity import OPPORTUNITY_CONFIG, compute_headroom_scores
 
 try:
     import numpy as np
@@ -32,7 +29,7 @@ except Exception:
     curve_fit = None
 
 base_dir_env = os.getenv('APP_BASE_DIR')
-BASE_DIR = Path(base_dir_env) if base_dir_env else Path(__file__).resolve().parents[1]
+BASE_DIR = Path(base_dir_env) if base_dir_env else Path(__file__).resolve().parent
 CSV_PATH = BASE_DIR / 'pwc reports' / 'outputs' / 'python_output_all.csv'
 S50_LOOKUP_PATH = BASE_DIR / 'pwc reports' / 'outputs' / 's50_spend_lookup.csv'
 
