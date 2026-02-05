@@ -7,7 +7,7 @@ from typing import Optional
 
 from openpyxl import load_workbook
 
-BASE_DIR = Path('/home/ali/repos/porsche')
+BASE_DIR = Path(__file__).resolve().parents[1]
 WEEKLY_DIR = BASE_DIR / 'pwc reports' / 'Weekly'
 OUTPUT_PATH = BASE_DIR / 'pwc reports' / 'outputs' / 'python_output_latest.csv'
 

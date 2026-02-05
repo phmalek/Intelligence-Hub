@@ -2,6 +2,7 @@ from io import BytesIO
 from pathlib import Path
 import os
 import re
+import hmac
 from datetime import datetime
 from typing import Optional
 
@@ -30,7 +31,7 @@ except Exception:
     np = None
     curve_fit = None
 
-base_dir_env = os.getenv('PORSCHE_BASE_DIR')
+base_dir_env = os.getenv('APP_BASE_DIR')
 BASE_DIR = Path(base_dir_env) if base_dir_env else Path(__file__).resolve().parents[1]
 CSV_PATH = BASE_DIR / 'pwc reports' / 'outputs' / 'python_output_all.csv'
 S50_LOOKUP_PATH = BASE_DIR / 'pwc reports' / 'outputs' / 's50_spend_lookup.csv'
@@ -38,6 +39,69 @@ S50_LOOKUP_PATH = BASE_DIR / 'pwc reports' / 'outputs' / 's50_spend_lookup.csv'
 st.set_page_config(page_title='Close the Gap Dashboard', layout='wide')
 
 load_dotenv()
+
+def _load_auth_users() -> dict:
+    raw_users = os.getenv('APP_AUTH_USERS', '').strip()
+    if raw_users:
+        users = {}
+        for item in raw_users.split(','):
+            item = item.strip()
+            if not item or ':' not in item:
+                continue
+            username, password = item.split(':', 1)
+            username = username.strip()
+            password = password.strip()
+            if username and password:
+                users[username] = password
+        return users
+
+    single_user = os.getenv('APP_AUTH_USER', '').strip()
+    single_pass = os.getenv('APP_AUTH_PASSWORD', '').strip()
+    return {single_user: single_pass} if single_user and single_pass else {}
+
+
+def _verify_credentials(username: str, password: str, users: dict) -> bool:
+    if not username or not password:
+        return False
+    stored = users.get(username, '')
+    return hmac.compare_digest(password, stored)
+
+
+def require_auth():
+    users = _load_auth_users()
+    if not users:
+        st.error(
+            'Authentication is not configured. Set APP_AUTH_USERS (user:pass,...) '
+            'or APP_AUTH_USER and APP_AUTH_PASSWORD in the environment.'
+        )
+        st.stop()
+
+    if st.session_state.get('authenticated'):
+        with st.sidebar:
+            st.caption(f"Signed in as {st.session_state.get('auth_user', 'user')}")
+            if st.button('Logout'):
+                st.session_state['authenticated'] = False
+                st.session_state['auth_user'] = None
+                st.rerun()
+        return
+
+    st.title('Authentication Required')
+    with st.form('login_form'):
+        username = st.text_input('Username')
+        password = st.text_input('Password', type='password')
+        submitted = st.form_submit_button('Sign in')
+    if submitted:
+        if _verify_credentials(username, password, users):
+            st.session_state['authenticated'] = True
+            st.session_state['auth_user'] = username
+            st.success('Authenticated.')
+            st.rerun()
+        else:
+            st.error('Invalid username or password.')
+    st.stop()
+
+
+require_auth()
 
 @st.cache_data
 def load_data(csv_path: Path, mtime: float):
@@ -829,25 +893,11 @@ with st.sidebar:
             step=0.01,
             format='%.2f',
         )
-        recent_cpl_periods_input = st.number_input(
-            'Recent CPL periods',
+        recent_periods_input = st.number_input(
+            'Recent periods',
             min_value=1,
             max_value=52,
             value=int(OPPORTUNITY_CONFIG['recent_cpl_periods']),
-            step=1,
-        )
-        recent_scale_periods_input = st.number_input(
-            'Recent scale periods',
-            min_value=1,
-            max_value=52,
-            value=int(OPPORTUNITY_CONFIG['recent_scale_periods']),
-            step=1,
-        )
-        recent_curve_periods_input = st.number_input(
-            'Recent curve periods',
-            min_value=1,
-            max_value=52,
-            value=int(OPPORTUNITY_CONFIG['recent_curve_periods']),
             step=1,
         )
         growth_ratio_max_input = st.number_input(
@@ -951,9 +1001,9 @@ if page == 'Risk Analysis':
     st.subheader('Efficiency headroom (Step 1)')
     config_override = dict(OPPORTUNITY_CONFIG)
     config_override['headroom_high'] = float(headroom_high_input)
-    config_override['recent_cpl_periods'] = int(recent_cpl_periods_input)
-    config_override['recent_scale_periods'] = int(recent_scale_periods_input)
-    config_override['recent_curve_periods'] = int(recent_curve_periods_input)
+    config_override['recent_cpl_periods'] = int(recent_periods_input)
+    config_override['recent_scale_periods'] = int(recent_periods_input)
+    config_override['recent_curve_periods'] = int(recent_periods_input)
     config_override['growth_ratio_max'] = float(growth_ratio_max_input)
     config_override['mid_ratio_max'] = float(mid_ratio_max_input)
     df_input = df.copy()
@@ -1240,6 +1290,7 @@ if page == 'Risk Analysis':
                     if worth_map and not worth_map.get(str(trace.name), False):
                         trace.marker.color = '#9e9e9e'
                         trace.marker.opacity = 0.6
+                fit_rows = []
                 if np is None or curve_fit is None:
                     st.info('Install scipy to enable curve fitting for Ax/(b+x).')
                 else:
@@ -1250,6 +1301,12 @@ if page == 'Risk Analysis':
                         a, b = fit_saturation(group['Media Spend'], group['DCFS'])
                         if a is None or b is None:
                             continue
+                        fit_rows.append({
+                            'group': group_label,
+                            'A': a,
+                            'B': b,
+                            'points': len(group),
+                        })
                         x_fit = np.linspace(group['Media Spend'].min(), group['Media Spend'].max(), 100)
                         y_fit = _saturation_curve(x_fit, a, b)
                         curve_fig.add_trace(
@@ -1263,6 +1320,9 @@ if page == 'Risk Analysis':
                             )
                         )
                 st.plotly_chart(curve_fig, use_container_width=True)
+                if fit_rows:
+                    st.subheader('Media response fit parameters (A, B)')
+                    st.dataframe(pd.DataFrame(fit_rows).sort_values('A', ascending=False))
 
         st.subheader('Spend distribution by group (Step 3)')
         with st.popover('What is this?'):
@@ -1856,7 +1916,7 @@ if page == 'Market Report - Excel Export':
     st.download_button(
         'Download Excel',
         data=workbook,
-        file_name=f'Porsche_Close_the_Gap_{export_market}_2025.xlsx',
+        file_name=f'Close_the_Gap_{export_market}_2025.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     )
     st.stop()

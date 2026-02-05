@@ -3,7 +3,7 @@ import http.server
 import socketserver
 from pathlib import Path
 
-BASE_DIR = Path('/home/ali/repos/porsche')
+BASE_DIR = Path(__file__).resolve().parents[1]
 SERVE_DIR = BASE_DIR / 'pwc reports' / 'outputs'
 PORT = 8000
 

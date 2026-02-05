@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple
 
 from openpyxl import Workbook, load_workbook
 
-BASE_DIR = Path('/home/ali/repos/porsche')
+BASE_DIR = Path(__file__).resolve().parents[1]
 WEEKLY_DIR = BASE_DIR / 'pwc reports' / 'Weekly'
 OUTPUT_DIR = BASE_DIR / 'pwc reports' / 'outputs'
 OUTPUT_PATH = OUTPUT_DIR / 'weekly_longlist_report.xlsx'
