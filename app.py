@@ -32,8 +32,9 @@ base_dir_env = os.getenv('APP_BASE_DIR')
 BASE_DIR = Path(base_dir_env) if base_dir_env else Path(__file__).resolve().parent
 CSV_PATH = BASE_DIR / 'pwc reports' / 'outputs' / 'python_output_all.csv'
 S50_LOOKUP_PATH = BASE_DIR / 'pwc reports' / 'outputs' / 's50_spend_lookup.csv'
+LOGO_PATH = BASE_DIR / 'porsche_logo.png'
 
-st.set_page_config(page_title='Close the Gap Dashboard', layout='wide')
+st.set_page_config(page_title='Intelligence Console', layout='wide')
 
 load_dotenv()
 
@@ -64,6 +65,21 @@ def _verify_credentials(username: str, password: str, users: dict) -> bool:
     return hmac.compare_digest(password, stored)
 
 
+def _render_auth_header():
+    if LOGO_PATH.exists():
+        cols = st.columns([1, 2, 1])
+        with cols[1]:
+            st.image(str(LOGO_PATH), width=260)
+    st.markdown(
+        """
+        <div style="text-align:center; margin-top: 6px;">
+          <div style="font-size: 28px; font-weight: 700;">Authentication Required</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def require_auth():
     users = _load_auth_users()
     if not users:
@@ -75,6 +91,8 @@ def require_auth():
 
     if st.session_state.get('authenticated'):
         with st.sidebar:
+            if LOGO_PATH.exists():
+                st.image(str(LOGO_PATH), width=200)
             st.caption(f"Signed in as {st.session_state.get('auth_user', 'user')}")
             if st.button('Logout'):
                 st.session_state['authenticated'] = False
@@ -82,11 +100,13 @@ def require_auth():
                 st.rerun()
         return
 
-    st.title('Authentication Required')
-    with st.form('login_form'):
-        username = st.text_input('Username')
-        password = st.text_input('Password', type='password')
-        submitted = st.form_submit_button('Sign in')
+    _render_auth_header()
+    left, center, right = st.columns([1, 2, 1])
+    with center:
+        with st.form('login_form'):
+            username = st.text_input('Username')
+            password = st.text_input('Password', type='password')
+            submitted = st.form_submit_button('Sign in')
     if submitted:
         if _verify_credentials(username, password, users):
             st.session_state['authenticated'] = True
@@ -557,7 +577,7 @@ if not s50_lookup.empty and s50_join_cols:
         df['s50_spend'] = df['s50_spend_lookup']
         df = df.drop(columns=['s50_spend_lookup'])
 
-st.title('Close The Gap Dashboard')
+st.title('Intelligence Console')
 st.caption(f'Data source: {data_source_label}')
 
 numeric_cols = df.select_dtypes(include='number').columns.tolist()
@@ -768,11 +788,11 @@ with st.sidebar:
         for label, col in dimension_candidates:
             if col in df.columns:
                 options = ['All'] + sorted(df[col].dropna().unique())
-                dual_selections[col] = st.multiselect(f'{label}', options, default=['All'])
-
-        for label, col in dimension_candidates:
-            if col in df.columns:
-                dual_aggregate_dims[col] = st.checkbox(f'Aggregate {label}', value=False)
+                select_col, agg_col = st.columns([3, 1], vertical_alignment='center')
+                with select_col:
+                    dual_selections[col] = st.multiselect(f'{label}', options, default=['All'])
+                with agg_col:
+                    dual_aggregate_dims[col] = st.checkbox('Aggregate', value=True, key=f'agg_{col}')
 
         breakdown_dims = [
             col
@@ -789,7 +809,7 @@ with st.sidebar:
         ]
         kpi_choices = [k for k in base_kpis if k not in extra_kpis] + extra_kpis
         dual_left_kpi = st.selectbox('Left axis KPI', kpi_choices, index=0)
-        compare_kpis = st.checkbox('Compare (add right axis)', value=True)
+        compare_kpis = st.checkbox('Compare (add right axis)', value=False)
         if compare_kpis:
             dual_right_kpi = st.selectbox('Right axis KPI', kpi_choices, index=min(7, len(kpi_choices) - 1))
         else:
@@ -881,6 +901,7 @@ with st.sidebar:
         market_options = ['All'] + sorted(df['Market'].dropna().unique()) if 'Market' in df.columns else ['All']
         channel_options = ['All'] + sorted(df['Channel'].dropna().unique()) if 'Channel' in df.columns else ['All']
         model_options = ['All'] + sorted(df['Model'].dropna().unique()) if 'Model' in df.columns else ['All']
+        campaign_options = ['All'] + sorted(df['Campaign'].dropna().unique()) if 'Campaign' in df.columns else ['All']
 
         headroom_high_input = st.number_input(
             'Headroom high threshold',
@@ -923,6 +944,7 @@ with st.sidebar:
         opp_market = st.selectbox('Market', market_options)
         opp_channel = st.selectbox('Channel', channel_options)
         opp_model = st.selectbox('Model', model_options)
+        opp_campaign = st.selectbox('Campaign', campaign_options)
         filtered = None
         model_df = None
         market = None
@@ -995,7 +1017,22 @@ with st.sidebar:
         top_n = None
 
 if page == 'Risk Analysis':
-    st.subheader('Efficiency headroom (Step 1)')
+    st.subheader('Risk Analysis')
+    with st.popover('What is this?'):
+        st.write(
+            'This page scores markets/channels/models for opportunity and risk using recent '
+            'performance and spend efficiency. It combines headroom, scale, curve position, '
+            'and predictability into one opportunity score.'
+        )
+        st.write(
+            'How to use it:\n'
+            '1. Set thresholds in the left panel (or keep defaults).\n'
+            '2. Filter by Market/Channel/Model if you want a narrower view.\n'
+            '3. Review each step section to see how the score is built.\n'
+            '4. Use the LLM report for a plain‑language summary.'
+        )
+
+    st.subheader('Efficiency headroom')
     config_override = dict(OPPORTUNITY_CONFIG)
     config_override['headroom_high'] = float(headroom_high_input)
     config_override['recent_cpl_periods'] = int(recent_periods_input)
@@ -1030,6 +1067,8 @@ if page == 'Risk Analysis':
         df_input = df_input[df_input['Channel'] == opp_channel]
     if opp_model != 'All':
         df_input = df_input[df_input['Model'] == opp_model]
+    if opp_campaign != 'All':
+        df_input = df_input[df_input['Campaign'] == opp_campaign]
 
     results, missing = compute_headroom_scores(df_input, config_override)
     if missing:
@@ -1040,56 +1079,9 @@ if page == 'Risk Analysis':
         st.stop()
 
     st.subheader('LLM report')
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        st.warning('OPENAI_API_KEY is not set in .env.')
-    else:
-        step_definitions = {
-            'Step 0 — Data sufficiency gate': (
-                'If n_weeks < min_weeks_required OR total_spend < min_total_spend OR '
-                'total_dcfs < min_total_dcfs => tier NONE and score 0.'
-            ),
-            'Step 1 — Efficiency headroom': (
-                'current_cpl = median CPL of most recent 3 valid periods. '
-                'benchmark_cpl_p25 = 25th percentile with fallbacks. '
-                'headroom = (current_cpl - benchmark) / benchmark; clamp; score from headroom.'
-            ),
-            'Step 2 — Scalable volume': (
-                'avg_dcfs_recent = mean DCFS over most recent 4 periods. '
-                'scale_score = percentile rank within channel.'
-            ),
-            'Step 3 — Curve position': (
-                'spend_recent vs s50_spend ratio defines GROWTH/MID/SATURATED; curve_score 100/50/0.'
-            ),
-            'Step 4 — Predictability penalty (volatility)': (
-                'volatility = (q3 - q1) / (q3 + q1) on CPL; tiered to penalties.'
-            ),
-            'Step 5 — Opportunity score aggregation': (
-                'raw = 0.45*headroom_score + 0.25*scale_score + 0.30*curve_score; '
-                'opportunity_score = clamp(raw - predictability_penalty, 0, 100).'
-            ),
-            'Step 6 — Opportunity tier mapping': (
-                'Score thresholds: >=70 HIGH, >=40 MEDIUM, >=15 LOW, else NONE. '
-                'Overrides: SATURATED => max LOW; headroom NONE => max MEDIUM; VERY_HIGH volatility => NONE.'
-            ),
-        }
-        final_guidance = (
-            'Write for non-technical marketers: short sentences, explain why scores change, '
-            'call out top opportunities and risks. Avoid formulas unless necessary.'
-        )
-        if st.button('Generate LLM Report (Markdown)'):
-            with st.spinner('Generating report...'):
-                progress = st.progress(0, text='Starting report...')
-                payload = _build_step_payload(results)
-                report_text = _run_llm_report(payload, step_definitions, final_guidance, progress=progress)
-                progress.progress(1.0, text='Report ready')
-                st.markdown(report_text)
-                st.download_button(
-                    'Download report (Markdown)',
-                    data=report_text,
-                    file_name='opportunity_report.md',
-                    mime='text/markdown',
-                )
+    st.caption('LLM insights (wireframe)')
+    if st.button('Generate LLM Report (Markdown)'):
+        st.info('Coming soon...')
 
     st.subheader('Headroom by group')
     with st.popover('What is this?'):
@@ -1165,26 +1157,9 @@ if page == 'Risk Analysis':
             fig.update_yaxes(title_text='Headroom %')
             st.plotly_chart(fig, use_container_width=True)
             if st.button('Generate headroom report', key='headroom_report'):
-                with st.spinner('Generating headroom report...'):
-                    tier_counts = plot_df['tier'].value_counts().to_dict()
-                    summary = {
-                        'groups': len(plot_df),
-                        'mean_headroom_pct': float(plot_df['headroom_pct'].mean()),
-                        'median_headroom_pct': float(plot_df['headroom_pct'].median()),
-                        'tier_counts': tier_counts,
-                        'top_groups': plot_df.nlargest(3, 'headroom_pct')[['group', 'headroom_pct']].to_dict('records'),
-                        'bottom_groups': plot_df.nsmallest(3, 'headroom_pct')[['group', 'headroom_pct']].to_dict('records'),
-                        'high_threshold_pct': high_pct,
-                        'med_threshold_pct': med_pct,
-                        'recent_cpl_periods': int(OPPORTUNITY_CONFIG['recent_cpl_periods']),
-                        'benchmark': 'P25 CPL within market/channel/model, falling back to market/channel then channel',
-                        'headroom_formula': '(current_cpl - benchmark) / benchmark, clamped and scored',
-                    }
-                    report_text = _run_headroom_report(summary)
-                    st.session_state['headroom_report_text'] = report_text
-                    st.markdown(report_text)
+                st.info('Coming soon...')
 
-        st.subheader('Scale (Step 2) by group')
+        st.subheader('Scale')
         with st.popover('What is this?'):
             st.write(
                 'Measures scalable volume using average DCFS over the most recent periods, '
@@ -1222,22 +1197,9 @@ if page == 'Risk Analysis':
             fig.update_yaxes(title_text='Scale score (0–100)', range=[0, 110])
             st.plotly_chart(fig, use_container_width=True)
             if st.button('Generate scale report', key='scale_report'):
-                with st.spinner('Generating scale report...'):
-                    summary = {
-                        'groups': len(scale_df),
-                        'mean_scale_score': float(scale_df['scale_score'].mean()),
-                        'median_scale_score': float(scale_df['scale_score'].median()),
-                        'top_groups': scale_df.nlargest(3, 'scale_score')[['group', 'scale_score']].to_dict('records'),
-                        'bottom_groups': scale_df.nsmallest(3, 'scale_score')[['group', 'scale_score']].to_dict('records'),
-                        'recent_scale_periods': int(OPPORTUNITY_CONFIG['recent_scale_periods']),
-                        'scale_proxy': 'avg DCFS over recent periods',
-                        'ranking_basis': 'percentile rank within channel',
-                    }
-                    report_text = _run_scale_report(summary)
-                    st.session_state['scale_report_text'] = report_text
-                    st.markdown(report_text)
+                st.info('Coming soon...')
 
-        st.subheader('Media response curve (Step 3)')
+        st.subheader('Media response curve')
         with st.popover('What is this?'):
             st.write(
                 'Plots Media Spend vs. DCFS to visualize response curves and fitted saturation trends. '
@@ -1321,7 +1283,7 @@ if page == 'Risk Analysis':
                     st.subheader('Media response fit parameters (A, B)')
                     st.dataframe(pd.DataFrame(fit_rows).sort_values('A', ascending=False))
 
-        st.subheader('Spend distribution by group (Step 3)')
+        st.subheader('Spend distribution')
         with st.popover('What is this?'):
             st.write(
                 'Compares recent spend to s50 benchmarks and shows spend distributions by group '
@@ -1407,28 +1369,9 @@ if page == 'Risk Analysis':
             fig.update_layout(yaxis_title='Media Spend')
             st.plotly_chart(fig, use_container_width=True)
             if st.button('Generate spend distribution report', key='spend_distribution_report'):
-                with st.spinner('Generating spend distribution report...'):
-                    threshold_summary = {
-                        'growth_ratio_max': float(growth_ratio_max_input),
-                        'mid_ratio_max': float(mid_ratio_max_input),
-                    }
-                    summary = {
-                        'groups': len(groups),
-                        'group_by': group_by or 'All',
-                        'recent_spend_series': recent_map,
-                        's50_spend_series': s50_map,
-                        'zone_thresholds': threshold_summary,
-                        'plot_elements': {
-                            'bars': 'Recent spend (mean of recent periods) per group',
-                            'boxes': 'Distribution of Media Spend values per group',
-                        'bar_color': 'Bar color indicates zone from recent spend / s50 ratio',
-                        },
-                    }
-                    report_text = _run_spend_distribution_report(summary)
-                    st.session_state['spend_distribution_report_text'] = report_text
-                    st.markdown(report_text)
+                st.info('Coming soon...')
 
-        st.subheader('Predictability (Step 4) by group')
+        st.subheader('Predictability')
         with st.popover('What is this?'):
             st.write(
                 'Shows CPL volatility (IQR/median) and the resulting predictability tier. '
@@ -1484,28 +1427,9 @@ if page == 'Risk Analysis':
                 fig.update_yaxes(title_text='Volatility (IQR / median)')
                 st.plotly_chart(fig, use_container_width=True)
                 if st.button('Generate predictability report', key='predictability_report'):
-                    with st.spinner('Generating predictability report...'):
-                        summary = {
-                            'groups': len(vol_agg),
-                            'group_by': group_by or 'All',
-                            'median_volatility': float(vol_agg['volatility'].median()),
-                            'tier_counts': vol_agg['vol_tier'].value_counts().to_dict(),
-                            'thresholds': {
-                                'low': vol_low,
-                                'med': vol_med,
-                                'high': vol_high,
-                            },
-                            'plot_elements': {
-                                'bars': 'Median CPL volatility per group',
-                                'bar_color': 'Color indicates volatility tier',
-                                'lines': 'Horizontal lines mark LOW/MED/HIGH thresholds',
-                            },
-                        }
-                        report_text = _run_predictability_report(summary)
-                        st.session_state['predictability_report_text'] = report_text
-                        st.markdown(report_text)
+                    st.info('Coming soon...')
 
-        st.subheader('Opportunity score (Step 5) by group')
+        st.subheader('Opportunity score')
         with st.popover('What is this?'):
             st.write(
                 'Combines headroom, scale, and curve scores minus volatility penalties into a '
@@ -1536,35 +1460,12 @@ if page == 'Risk Analysis':
             fig.update_yaxes(title_text='Opportunity score (0–100)', range=[0, 110])
             st.plotly_chart(fig, use_container_width=True)
             if st.button('Generate opportunity score report', key='opportunity_report'):
-                with st.spinner('Generating opportunity score report...'):
-                    summary = {
-                        'groups': len(opp_agg),
-                        'group_by': group_by or 'All',
-                        'mean_opportunity_score': float(opp_agg['opportunity_score'].mean()),
-                        'median_opportunity_score': float(opp_agg['opportunity_score'].median()),
-                        'top_groups': opp_agg.nlargest(3, 'opportunity_score')[['group', 'opportunity_score']].to_dict('records'),
-                        'bottom_groups': opp_agg.nsmallest(3, 'opportunity_score')[['group', 'opportunity_score']].to_dict('records'),
-                    }
-                    report_text = _run_opportunity_report(summary)
-                    st.session_state['opportunity_report_text'] = report_text
-                    st.markdown(report_text)
+                st.info('Coming soon...')
 
         st.subheader('Conclusion and budget strategy')
-        st.caption('Uses the latest LLM outputs from the step reports above.')
+        st.caption('LLM conclusion (wireframe)')
         if st.button('Generate final conclusion', key='final_conclusion'):
-            with st.spinner('Generating final conclusion...'):
-                reports = {
-                    'headroom': st.session_state.get('headroom_report_text', ''),
-                    'scale': st.session_state.get('scale_report_text', ''),
-                    'spend_distribution': st.session_state.get('spend_distribution_report_text', ''),
-                    'predictability': st.session_state.get('predictability_report_text', ''),
-                    'opportunity': st.session_state.get('opportunity_report_text', ''),
-                }
-                missing = [key for key, value in reports.items() if not value]
-                if missing:
-                    st.warning(f'Missing step reports: {", ".join(missing)}. Generate them for best results.')
-                report_text = _run_final_conclusion(reports)
-                st.markdown(report_text)
+            st.info('Coming soon...')
 
     st.caption('Headroom is based on median CPL of the most recent 3 valid periods vs. historical P25 CPL.')
 
@@ -2074,7 +1975,20 @@ if page == 'KPI vs Investment':
     st.stop()
 
 if page == 'Overview':
-    st.subheader('Dual KPI chart')
+    st.subheader('KPI chart')
+    with st.popover('What is this?'):
+        st.write(
+            'This page shows how your key performance indicators (KPIs) change by calendar week. '
+            'Use the filters to pick which data you want to include, and the chart will update.'
+        )
+        st.write(
+            'How to use it (beginner-friendly):\n'
+            '1. Start with everything aggregated (default). This gives one clean line per KPI.\n'
+            '2. Pick a KPI on the left axis (for example, Media Spend or DCFS).\n'
+            '3. If you want to compare two KPIs, turn on Compare and pick a right-axis KPI.\n'
+            '4. To focus on a subset, use the dropdowns. Select specific values instead of All.\n'
+            '5. To split the line by a dimension, uncheck Aggregate next to that dropdown.'
+        )
     dual_base = df.copy()
     breakdown_dims = dual_breakdown_dim or []
 
