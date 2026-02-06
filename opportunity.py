@@ -369,10 +369,10 @@ def compute_headroom_scores(df_in, config):
                     })
                     result_df.at[idx, 'audit'] = audit
 
-    headroom_component = result_df['headroom_score'].fillna(0.0)
-    scale_component = result_df['scale_score'].fillna(0.0)
-    curve_component = result_df['curve_score'].fillna(0.0)
-    penalty_component = result_df['predictability_penalty'].fillna(0.0)
+    headroom_component = pd.to_numeric(result_df['headroom_score'], errors='coerce').fillna(0.0)
+    scale_component = pd.to_numeric(result_df['scale_score'], errors='coerce').fillna(0.0)
+    curve_component = pd.to_numeric(result_df['curve_score'], errors='coerce').fillna(0.0)
+    penalty_component = pd.to_numeric(result_df['predictability_penalty'], errors='coerce').fillna(0.0)
     raw_opportunity_score = (
         0.45 * headroom_component
         + 0.25 * scale_component

@@ -31,7 +31,6 @@ except Exception:
 base_dir_env = os.getenv('APP_BASE_DIR')
 BASE_DIR = Path(base_dir_env) if base_dir_env else Path(__file__).resolve().parent
 CSV_PATH = BASE_DIR / 'pwc reports' / 'outputs' / 'python_output_all.csv'
-S50_LOOKUP_PATH = BASE_DIR / 'pwc reports' / 'outputs' / 's50_spend_lookup.csv'
 LOGO_PATH = BASE_DIR / 'porsche_logo.png'
 
 st.set_page_config(page_title='Intelligence Console', layout='wide')
@@ -124,25 +123,6 @@ require_auth()
 def load_data(csv_path: Path, mtime: float):
     df = pd.read_csv(csv_path, low_memory=False)
     return normalize_data(df)
-
-
-@st.cache_data
-def load_s50_lookup(csv_path: Path, mtime: float):
-    if not csv_path.exists():
-        return pd.DataFrame(), []
-    lookup = pd.read_csv(csv_path, low_memory=False)
-    if 's50_spend' not in lookup.columns or 'Market' not in lookup.columns:
-        return pd.DataFrame(), []
-    lookup['s50_spend'] = pd.to_numeric(lookup['s50_spend'], errors='coerce')
-
-    join_cols = ['Market']
-    if 'Channel' in lookup.columns:
-        join_cols.append('Channel')
-    if 'Model' in lookup.columns:
-        join_cols.append('Model')
-
-    lookup = lookup[join_cols + ['s50_spend']].copy()
-    return lookup, join_cols
 
 
 def normalize_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -568,15 +548,6 @@ with st.sidebar.expander('Data diagnostics'):
         st.write('Calendar weeks:', week_list[:5], '...', week_list[-5:])
         st.write('Total weeks:', len(week_list))
 
-s50_lookup, s50_join_cols = load_s50_lookup(
-    S50_LOOKUP_PATH, S50_LOOKUP_PATH.stat().st_mtime if S50_LOOKUP_PATH.exists() else 0
-)
-if not s50_lookup.empty and s50_join_cols:
-    df = df.merge(s50_lookup, on=s50_join_cols, how='left', suffixes=('', '_lookup'))
-    if 's50_spend_lookup' in df.columns:
-        df['s50_spend'] = df['s50_spend_lookup']
-        df = df.drop(columns=['s50_spend_lookup'])
-
 st.title('Intelligence Console')
 st.caption(f'Data source: {data_source_label}')
 
@@ -768,6 +739,27 @@ def fit_saturation(x, y):
         return None, None
 
 
+def compute_dynamic_s50(df_in):
+    if np is None or curve_fit is None:
+        return {}
+    group_cols = [col for col in ['Market', 'Channel', 'Model'] if col in df_in.columns]
+    if not group_cols:
+        return {}
+    curve_df = df_in.copy()
+    curve_df['Media Spend'] = pd.to_numeric(curve_df['Media Spend'], errors='coerce')
+    curve_df['DCFS'] = pd.to_numeric(curve_df['DCFS'], errors='coerce')
+    curve_df = curve_df[(curve_df['Media Spend'] > 0) & (curve_df['DCFS'] >= 0)]
+    if curve_df.empty:
+        return {}
+    s50_map = {}
+    for key, group in curve_df.groupby(group_cols, dropna=False):
+        a, b = fit_saturation(group['Media Spend'], group['DCFS'])
+        if b is None or pd.isna(b) or b <= 0:
+            continue
+        s50_map[key] = float(b)
+    return s50_map
+
+
 with st.sidebar:
     page = st.radio(
         'Page',
@@ -940,7 +932,6 @@ with st.sidebar:
         )
         group_by_candidates = [col for col in ['Market', 'Channel', 'Model'] if col in df.columns]
         group_by = st.selectbox('Group plots by', group_by_candidates, index=0) if group_by_candidates else None
-        uploaded_s50 = st.file_uploader('Upload s50 lookup CSV', type=['csv'])
         opp_market = st.selectbox('Market', market_options)
         opp_channel = st.selectbox('Channel', channel_options)
         opp_model = st.selectbox('Model', model_options)
@@ -1041,26 +1032,6 @@ if page == 'Risk Analysis':
     config_override['growth_ratio_max'] = float(growth_ratio_max_input)
     config_override['mid_ratio_max'] = float(mid_ratio_max_input)
     df_input = df.copy()
-    if uploaded_s50 is not None:
-        try:
-            upload_df = pd.read_csv(uploaded_s50)
-            if 's50_spend' in upload_df.columns and 'Market' in upload_df.columns:
-                join_cols = ['Market']
-                if 'Channel' in upload_df.columns:
-                    join_cols.append('Channel')
-                if 'Model' in upload_df.columns:
-                    join_cols.append('Model')
-                upload_df['s50_spend'] = pd.to_numeric(upload_df['s50_spend'], errors='coerce')
-                upload_df = upload_df[join_cols + ['s50_spend']].copy()
-                df_input = df_input.merge(upload_df, on=join_cols, how='left', suffixes=('', '_upload'))
-                if 's50_spend_upload' in df_input.columns:
-                    df_input['s50_spend'] = df_input['s50_spend_upload']
-                    df_input = df_input.drop(columns=['s50_spend_upload'])
-            else:
-                st.warning('s50 upload needs at least Market and s50_spend columns.')
-        except Exception:
-            st.warning('Unable to read the uploaded s50 CSV.')
-
     if opp_market != 'All':
         df_input = df_input[df_input['Market'] == opp_market]
     if opp_channel != 'All':
@@ -1069,6 +1040,19 @@ if page == 'Risk Analysis':
         df_input = df_input[df_input['Model'] == opp_model]
     if opp_campaign != 'All':
         df_input = df_input[df_input['Campaign'] == opp_campaign]
+
+    if np is None or curve_fit is None:
+        st.info('Install scipy to enable dynamic s50 curve fitting.')
+    else:
+        s50_map = compute_dynamic_s50(df_input)
+        if s50_map:
+            group_cols = [col for col in ['Market', 'Channel', 'Model'] if col in df_input.columns]
+            if group_cols:
+                df_input = df_input.copy()
+                df_input['s50_spend'] = (
+                    df_input[group_cols]
+                    .apply(lambda r: s50_map.get(tuple(r.tolist())), axis=1)
+                )
 
     results, missing = compute_headroom_scores(df_input, config_override)
     if missing:
@@ -1339,12 +1323,22 @@ if page == 'Risk Analysis':
                 zone_groups = [g for g in groups if zones_by_group.get(g) == zone]
                 if not zone_groups:
                     continue
+                zone_custom = [
+                    [recent_map.get(g), s50_map.get(g)]
+                    for g in zone_groups
+                ]
                 fig.add_trace(
                     go.Bar(
                         x=zone_groups,
                         y=[recent_map.get(g) for g in zone_groups],
                         marker=dict(color=color, opacity=0.5),
                         name=f'Recent spend ({zone})',
+                        customdata=zone_custom,
+                        hovertemplate=(
+                            'Group: %{x}<br>'
+                            'Current spend: %{customdata[0]:,.2f}<br>'
+                            'Saturation point: %{customdata[1]:,.2f}<extra></extra>'
+                        ),
                     )
                 )
             for group in groups:
