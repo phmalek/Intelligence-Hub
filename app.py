@@ -37,6 +37,58 @@ st.set_page_config(page_title='Intelligence Console', layout='wide')
 
 load_dotenv()
 
+HEADROOM_SUMMARY_TEMPLATE = (
+    "Headroom by [GROUP_BY] quantifies efficiency upside versus a benchmark CPL. "
+    "Across all [GROUP_BY], headroom ranges from [BOTTOM_HEADROOM]% to [TOP_HEADROOM]%. "
+    "[TOP_GROUP] leads with [TOP_HEADROOM]% headroom, indicating the strongest efficiency upside, "
+    "while [BOTTOM_GROUP] is lowest at [BOTTOM_HEADROOM]%. "
+    "Thresholds are set at [MED_THRESHOLD]% (MED) and [HIGH_THRESHOLD]% (HIGH). "
+    "Summary: [TAKEAWAY]."
+)
+
+ALLOCATION_METHOD_TEMPLATE = (
+    "Budget Allocation Methodology (Technical)\n"
+    "Scope & Filters\n"
+    "- Grouping level: [GROUP_BY]\n"
+    "- Markets included: [MARKETS]\n"
+    "- Channels included: [CHANNELS]\n"
+    "- Models/Carline included: [MODELS]\n"
+    "- Campaigns included: [CAMPAIGNS]\n"
+    "- Curve time axis: [CURVE_GROUP]\n\n"
+    "Definitions\n"
+    "1) Spend response curve: we fit a saturation curve per group using DCFS vs Media Spend: "
+    "f(x) = A*x/(B+x). This models diminishing returns and enables spend‑optimal allocation.\n"
+    "2) Headroom (efficiency upside): for each group, headroom = (current CPL − benchmark CPL) / benchmark CPL. "
+    "Positive headroom means CPL is worse than benchmark, indicating room to improve efficiency. "
+    "Headroom is computed from recent periods and benchmarked against the 25th percentile CPL at the most granular "
+    "available level (Market+Channel+Model, then Market+Channel, then Channel).\n"
+    "3) Scale: we use recent DCFS volume as a scale proxy. Scale score is the percentile rank of recent DCFS "
+    "within Channel (0–100), then normalized to 0–1 for weighting.\n\n"
+    "Methodology\n"
+    "Step A — Spend‑optimal allocation: compute x_i^spend that maximizes Σ f_i(x_i) subject to Σ x_i = Budget "
+    "(closed‑form via equalized marginal returns).\n"
+    "Step B — Driver allocation: compute weights per group using headroom/scale strengths:\n"
+    "w_i = max(0, HeadroomStrength*headroom_i + ScaleStrength*scale_i). "
+    "Normalize to shares p_i = w_i / Σ w.\n"
+    "Step C — Blend spend vs drivers using ConstraintStrength:\n"
+    "q_i = x_i^spend / Budget, r_i = (1−ConstraintStrength)*q_i + ConstraintStrength*p_i, "
+    "x_i = Budget * r_i.\n"
+    "Step D — Minimum spend: if enabled, allocate minimums first, then distribute remaining budget by r_i.\n\n"
+    "Parameters Used\n"
+    "- HeadroomStrength = [HEADROOM_STRENGTH]\n"
+    "- ScaleStrength = [SCALE_STRENGTH]\n"
+    "- ConstraintStrength = [CONSTRAINT_STRENGTH] (0 = pure spend optimization, 1 = pure driver allocation)\n"
+    "- Minimum spend enabled = [MIN_CONSTRAINT_ENABLED]\n"
+    "- Minimum spend total = [MIN_TOTAL]\n"
+    "- Total budget = [BUDGET]\n"
+    "- Number of fitted curves = [CURVE_COUNT]\n\n"
+    "Results Summary\n"
+    "- Total DCFS (unconstrained) = [TOTAL_DCFS_UNCONSTRAINED]\n"
+    "- Total DCFS (constrained) = [TOTAL_DCFS_CONSTRAINED]\n\n"
+    "Group‑level Allocation Detail (per [GROUP_BY])\n"
+    "[ALLOCATION_TABLE]\n"
+)
+
 def _load_auth_users() -> dict:
     raw_users = os.getenv('APP_AUTH_USERS', '').strip()
     if raw_users:
@@ -172,20 +224,28 @@ def normalize_data(df: pd.DataFrame) -> pd.DataFrame:
     if 'Date' in df.columns:
         date_base = df['Date']
         valid_date = date_base.notna()
-        date_iso = date_base.dt.isocalendar()
-        date_week = date_iso['week']
-        date_year = date_iso['year']
-        df['calendar_week'] = df.get('calendar_week', pd.Series(dtype=object))
-        df.loc[valid_date, 'calendar_week'] = (
-            date_year[valid_date].astype(int).astype(str)
-            + '-CW'
-            + date_week[valid_date].astype(int).astype(str).str.zfill(2)
+        # Normalize existing calendar_week values and build sort keys from them.
+        if 'calendar_week' not in df.columns:
+            df['calendar_week'] = pd.Series(pd.NA, index=df.index, dtype=object)
+        else:
+            df['calendar_week'] = df['calendar_week'].astype(str).str.strip()
+            df['calendar_week'] = df['calendar_week'].replace({'nan': pd.NA, 'None': pd.NA, '': pd.NA})
+        if 'calendar_week_sort' not in df.columns:
+            df['calendar_week_sort'] = pd.Series(pd.NA, index=df.index, dtype='Int64')
+        week_match = df['calendar_week'].str.extract(r'(?:(\d{4})\s*-\s*)?CW\s*(\d{1,2})', expand=True)
+        week_year = pd.to_numeric(week_match[0], errors='coerce')
+        week_num = pd.to_numeric(week_match[1], errors='coerce')
+        if 'report_cw_year' in df.columns:
+            week_year = week_year.fillna(df['report_cw_year'])
+        has_week = week_num.notna() & week_year.notna()
+        df.loc[has_week, 'calendar_week_sort'] = (
+            week_year[has_week].astype(int) * 100
+            + week_num[has_week].astype(int)
         )
-        df['calendar_week_sort'] = df.get('calendar_week_sort', pd.Series(dtype='Int64'))
-        df.loc[valid_date, 'calendar_week_sort'] = (
-            date_year[valid_date].astype(int) * 100
-            + date_week[valid_date].astype(int)
-        )
+
+        # Forward-fill missing weeks with the last non-null week (per row order).
+        df['calendar_week'] = df['calendar_week'].ffill()
+        df['calendar_week_sort'] = df['calendar_week_sort'].ffill()
 
         week_start = date_base - pd.to_timedelta(date_base.dt.weekday, unit='D')
         week_end = week_start + pd.Timedelta(days=6)
@@ -932,7 +992,20 @@ with st.sidebar:
         )
         group_by_candidates = [col for col in ['Market', 'Channel', 'Model'] if col in df.columns]
         group_by = st.selectbox('Group plots by', group_by_candidates, index=0) if group_by_candidates else None
-        opp_market = st.selectbox('Market', market_options)
+        def _expand_all_markets():
+            selected = st.session_state.get('risk_markets', [])
+            if 'All' in selected:
+                all_markets = [m for m in st.session_state.get('risk_market_options', []) if m != 'All']
+                st.session_state['risk_markets'] = all_markets
+
+        st.session_state['risk_market_options'] = market_options
+        opp_markets = st.multiselect(
+            'Markets',
+            market_options,
+            default=['All'],
+            key='risk_markets',
+            on_change=_expand_all_markets,
+        )
         opp_channel = st.selectbox('Channel', channel_options)
         opp_model = st.selectbox('Model', model_options)
         opp_campaign = st.selectbox('Campaign', campaign_options)
@@ -1032,8 +1105,8 @@ if page == 'Risk Analysis':
     config_override['growth_ratio_max'] = float(growth_ratio_max_input)
     config_override['mid_ratio_max'] = float(mid_ratio_max_input)
     df_input = df.copy()
-    if opp_market != 'All':
-        df_input = df_input[df_input['Market'] == opp_market]
+    if opp_markets and 'All' not in opp_markets:
+        df_input = df_input[df_input['Market'].isin(opp_markets)]
     if opp_channel != 'All':
         df_input = df_input[df_input['Channel'] == opp_channel]
     if opp_model != 'All':
@@ -1067,14 +1140,94 @@ if page == 'Risk Analysis':
     if st.button('Generate LLM Report (Markdown)'):
         st.info('Coming soon...')
 
+    st.subheader('Headroom process (selected group)')
+    with st.popover('What is this?'):
+        st.write(
+            'Shows how headroom is derived for one Market/Channel/Model: '
+            'current CPL, benchmark CPL (25th percentile), headroom %, and headroom score.'
+        )
+    pipeline_df = results[results['gate_passed']].copy()
+    pipeline_df = pipeline_df.dropna(subset=['current_cpl', 'benchmark_cpl_p25'])
+    if pipeline_df.empty:
+        st.info('No headroom process data available for the current filters.')
+    else:
+        pipeline_df['group_label'] = (
+            pipeline_df[['Market', 'Channel', 'Model']]
+            .astype(str)
+            .agg(' | '.join, axis=1)
+        )
+        selected_label = st.selectbox(
+            'Select group',
+            pipeline_df['group_label'].tolist(),
+        )
+        selected_row = pipeline_df[pipeline_df['group_label'] == selected_label].iloc[0]
+        current_cpl = float(selected_row['current_cpl'])
+        benchmark_cpl = float(selected_row['benchmark_cpl_p25'])
+        headroom_pct = float(selected_row['headroom']) * 100 if pd.notna(selected_row['headroom']) else None
+        headroom_score = float(selected_row['headroom_score']) if pd.notna(selected_row['headroom_score']) else None
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric('Current CPL', f'{current_cpl:,.2f}')
+        c2.metric('Benchmark CPL (P25)', f'{benchmark_cpl:,.2f}')
+        c3.metric('Headroom %', f'{headroom_pct:.1f}%' if headroom_pct is not None else 'n/a')
+
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            vertical_spacing=0.18,
+            specs=[[{}], [{'secondary_y': True}]],
+            subplot_titles=('CPL vs Benchmark', 'Headroom % and Score'),
+        )
+        fig.add_trace(
+            go.Bar(
+                x=['Benchmark CPL (P25)', 'Current CPL'],
+                y=[benchmark_cpl, current_cpl],
+                marker_color=['#9DB2BF', '#1F77B4'],
+            ),
+            row=1,
+            col=1,
+        )
+        fig.update_yaxes(title_text='CPL', row=1, col=1)
+
+        if headroom_pct is not None:
+            fig.add_trace(
+                go.Bar(
+                    x=['Headroom %'],
+                    y=[headroom_pct],
+                    marker_color='#2CA02C',
+                    name='Headroom %',
+                ),
+                row=2,
+                col=1,
+                secondary_y=False,
+            )
+        if headroom_score is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=['Headroom %'],
+                    y=[headroom_score],
+                    mode='markers+text',
+                    text=[f'{headroom_score:.0f}'],
+                    textposition='top center',
+                    marker=dict(size=12, color='#FF7F0E'),
+                    name='Headroom score',
+                ),
+                row=2,
+                col=1,
+                secondary_y=True,
+            )
+        fig.update_yaxes(title_text='Headroom %', row=2, col=1, secondary_y=False)
+        fig.update_yaxes(title_text='Score (0–100)', range=[0, 100], row=2, col=1, secondary_y=True)
+        fig.update_layout(showlegend=False, height=520)
+        st.plotly_chart(fig, use_container_width=True)
+
     st.subheader('Headroom by group')
     with st.popover('What is this?'):
         st.write(
             'Compares current CPL vs. a benchmark to show efficiency headroom by group. '
             'Higher headroom % means more room to improve efficiency.'
         )
-    base_df = results[results['gate_passed']].copy()
-    base_df = base_df.dropna(subset=['headroom', 'scale_score'])
+    base_df = results.copy()
     if base_df.empty:
         st.info('No headroom data for the current filters.')
     else:
@@ -1113,6 +1266,7 @@ if page == 'Risk Analysis':
         else:
             high_pct = float(headroom_high_input) * 100
             med_pct = float(OPPORTUNITY_CONFIG['headroom_med']) * 100
+            plot_df = plot_df.copy()
             plot_df['tier'] = 'LOW'
             plot_df.loc[plot_df['headroom_pct'] >= med_pct, 'tier'] = 'MED'
             plot_df.loc[plot_df['headroom_pct'] >= high_pct, 'tier'] = 'HIGH'
@@ -1140,6 +1294,21 @@ if page == 'Risk Analysis':
             )
             fig.update_yaxes(title_text='Headroom %')
             st.plotly_chart(fig, use_container_width=True)
+            if st.button('Generate headroom summary', key='headroom_summary'):
+                ordered = plot_df.sort_values('headroom_pct', ascending=False)
+                top_row = ordered.iloc[0]
+                bottom_row = ordered.iloc[-1]
+                summary = HEADROOM_SUMMARY_TEMPLATE
+                summary = summary.replace('[GROUP_BY]', group_by or 'Group')
+                summary = summary.replace('[RECENT_PERIODS]', str(int(recent_periods_input)))
+                summary = summary.replace('[HIGH_THRESHOLD]', f'{high_pct:.0f}')
+                summary = summary.replace('[MED_THRESHOLD]', f'{med_pct:.0f}')
+                summary = summary.replace('[TOP_GROUP]', str(top_row['group']))
+                summary = summary.replace('[TOP_HEADROOM]', f"{float(top_row['headroom_pct']):.1f}")
+                summary = summary.replace('[BOTTOM_GROUP]', str(bottom_row['group']))
+                summary = summary.replace('[BOTTOM_HEADROOM]', f"{float(bottom_row['headroom_pct']):.1f}")
+                summary = summary.replace('[TAKEAWAY]', 'headroom is concentrated in the leading groups')
+                st.text_area('Headroom summary (copy for report)', summary, height=140)
             if st.button('Generate headroom report', key='headroom_report'):
                 st.info('Coming soon...')
 
@@ -1190,8 +1359,8 @@ if page == 'Risk Analysis':
                 'Used to infer growth vs. saturation.'
             )
         curve_data = df.copy()
-        if opp_market != 'All':
-            curve_data = curve_data[curve_data['Market'] == opp_market]
+        if opp_markets and 'All' not in opp_markets:
+            curve_data = curve_data[curve_data['Market'].isin(opp_markets)]
         if opp_channel != 'All':
             curve_data = curve_data[curve_data['Channel'] == opp_channel]
         if opp_model != 'All':
@@ -1206,62 +1375,461 @@ if page == 'Risk Analysis':
             if not time_col:
                 st.info('No time column available for curve aggregation.')
             else:
-                worth_map = {}
-                if group_by:
-                    worth_map = (
-                        results.groupby(group_by, dropna=False)['curve_worthy']
-                        .max()
-                        .rename_axis('group')
-                        .to_dict()
-                    )
                 plot_df = (
                     curve_data.groupby([time_col, group_by], dropna=False)
                     .agg({'Media Spend': 'sum', 'DCFS': 'sum'})
                     .reset_index()
                 )
-                curve_fig = px.scatter(
-                    plot_df,
-                    x='Media Spend',
-                    y='DCFS',
-                    color=group_by,
-                    labels={'Media Spend': 'Media Spend', 'DCFS': 'DCFS', group_by: group_by},
-                    color_discrete_map=group_color_map if group_order else None,
-                )
+                curve_fig = go.Figure()
                 color_map = {}
-                for trace in curve_fig.data:
-                    color_map[str(trace.name)] = trace.marker.color
-                    if worth_map and not worth_map.get(str(trace.name), False):
-                        trace.marker.color = '#9e9e9e'
-                        trace.marker.opacity = 0.6
+                if group_order:
+                    palette = px.colors.qualitative.Safe
+                    for idx, group in enumerate(group_order):
+                        color_map[str(group)] = palette[idx % len(palette)]
                 fit_rows = []
+                fit_params = {}
+                alloc_rows = []
+                max_alloc = None
                 if np is None or curve_fit is None:
                     st.info('Install scipy to enable curve fitting for Ax/(b+x).')
                 else:
                     for group_key, group in plot_df.groupby(group_by, dropna=False):
                         group_label = str(group_key)
-                        if worth_map and not worth_map.get(group_label, False):
-                            continue
                         a, b = fit_saturation(group['Media Spend'], group['DCFS'])
                         if a is None or b is None:
                             continue
+                        if a <= 0 or b <= 0:
+                            continue
+                        fit_params[group_label] = (float(a), float(b))
                         fit_rows.append({
                             'group': group_label,
                             'A': a,
                             'B': b,
                             'points': len(group),
                         })
-                        x_fit = np.linspace(group['Media Spend'].min(), group['Media Spend'].max(), 100)
+                if fit_params:
+                    use_min_constraints = st.checkbox(
+                        'Use minimum spend constraints',
+                        value=True,
+                        key='use_min_constraints',
+                    )
+                    use_headroom_weighting = st.checkbox(
+                        'Weight by headroom',
+                        value=False,
+                        key='use_headroom_weighting',
+                    )
+                    headroom_lambda = st.slider(
+                        'Headroom strength',
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=1.0,
+                        step=0.05,
+                        disabled=not use_headroom_weighting,
+                    )
+                    if not use_headroom_weighting:
+                        headroom_lambda = 0.0
+                    use_scale_weighting = st.checkbox(
+                        'Weight by scale',
+                        value=False,
+                        key='use_scale_weighting',
+                    )
+                    scale_lambda = st.slider(
+                        'Scale strength',
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=1.0,
+                        step=0.05,
+                        disabled=not use_scale_weighting,
+                    )
+                    if not use_scale_weighting:
+                        scale_lambda = 0.0
+                    use_spend_weighting = st.checkbox(
+                        'Use spend curve',
+                        value=True,
+                        key='use_spend_weighting',
+                    )
+                    constraint_strength = st.slider(
+                        'Constraint strength',
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=0.0,
+                        step=0.05,
+                        disabled=not use_spend_weighting,
+                    )
+                    if not use_spend_weighting:
+                        constraint_strength = 0.0
+                    min_df = pd.DataFrame({
+                        'group': list(fit_params.keys()),
+                        'min_spend': [5000.0] * len(fit_params),
+                    })
+                    min_df = st.data_editor(
+                        min_df,
+                        use_container_width=True,
+                        num_rows='fixed',
+                        key='min_spend_per_curve',
+                        disabled=not use_min_constraints,
+                    )
+                    budget = st.number_input(
+                        'Max budget (total Media Spend)',
+                        min_value=0.0,
+                        value=0.0,
+                        step=1000.0,
+                        format='%.2f',
+                    )
+                    run_allocation = st.button('Run allocation', key='run_allocation')
+                    if run_allocation:
+                        if use_min_constraints:
+                            min_map = {
+                                str(row['group']): float(row['min_spend'] or 0.0)
+                                for _, row in min_df.iterrows()
+                            }
+                        else:
+                            min_map = {label: 0.0 for label in fit_params.keys()}
+                        min_map_unconstrained = {label: 0.0 for label in fit_params.keys()}
+                        if budget <= 0:
+                            st.warning('Enter a max budget greater than 0.')
+                            st.stop()
+                        min_total = sum(min_map.get(k, 0.0) for k in fit_params.keys())
+                        if min_total > budget:
+                            st.warning('Total minimum spend exceeds the max budget.')
+                            st.stop()
+
+                        headroom_map = {}
+                        if group_by and 'headroom' in results.columns:
+                            headroom_map = (
+                                results.groupby(group_by, dropna=False)['headroom']
+                                .mean()
+                                .to_dict()
+                            )
+
+                        scale_map = {}
+                        if group_by and 'scale_score' in results.columns:
+                            scale_map = (
+                                results.groupby(group_by, dropna=False)['scale_score']
+                                .mean()
+                                .to_dict()
+                            )
+
+                        def _weight_for_label(label: str, headroom_l: float, scale_l: float) -> float:
+                            h = headroom_map.get(label, 0.0)
+                            if h is None or pd.isna(h):
+                                h = 0.0
+                            s = scale_map.get(label, 0.0)
+                            if s is None or pd.isna(s):
+                                s = 0.0
+                            s = float(s) / 100.0
+                            return max(0.0, headroom_l * float(h) + scale_l * s)
+
+                        def _spend_only_allocation() -> pd.DataFrame:
+                            max_d0 = 0.0
+                            for label, (a, b) in fit_params.items():
+                                max_d0 = max(max_d0, a / b)
+                            if max_d0 <= 0:
+                                return pd.DataFrame()
+
+                            def _total_spend_for_lambda(lam):
+                                total = 0.0
+                                for label, (a, b) in fit_params.items():
+                                    x = (a * b / lam) ** 0.5 - b
+                                    if x < 0:
+                                        x = 0.0
+                                    total += x
+                                return total
+
+                            low_lam = 1e-12
+                            high_lam = max_d0
+                            for _ in range(80):
+                                mid = (low_lam + high_lam) / 2
+                                total = _total_spend_for_lambda(mid)
+                                if total > budget:
+                                    low_lam = mid
+                                else:
+                                    high_lam = mid
+                            lam = high_lam
+
+                            rows = []
+                            for group_label, (a, b) in fit_params.items():
+                                x = (a * b / lam) ** 0.5 - b
+                                if x < 0:
+                                    x = 0.0
+                                y = _saturation_curve(x, a, b) if x > 0 else 0.0
+                                rows.append({
+                                    'group': group_label,
+                                    'min_spend': 0.0,
+                                    'allocated_spend': x,
+                                    'allocated_pct': (x / budget * 100.0) if budget > 0 else 0.0,
+                                    'expected_dcfs': y,
+                                })
+                            df_out = pd.DataFrame(rows)
+                            total_alloc = df_out['allocated_spend'].sum()
+                            if total_alloc > 0 and budget > 0:
+                                scale = budget / total_alloc
+                                df_out['allocated_spend'] = df_out['allocated_spend'] * scale
+                                df_out['allocated_pct'] = (df_out['allocated_spend'] / budget) * 100.0
+                                df_out['expected_dcfs'] = df_out.apply(
+                                    lambda r: _saturation_curve(r['allocated_spend'], *fit_params[r['group']])
+                                    if r['allocated_spend'] > 0 else 0.0,
+                                    axis=1,
+                                )
+                            return df_out
+
+                        spend_df = _spend_only_allocation()
+                        spend_shares = {
+                            row['group']: (row['allocated_spend'] / budget) if budget > 0 else 0.0
+                            for _, row in spend_df.iterrows()
+                        }
+
+                        weights = {}
+                        total_weight = 0.0
+                        for label in fit_params.keys():
+                            w = _weight_for_label(label, headroom_lambda if use_headroom_weighting else 0.0, scale_lambda if use_scale_weighting else 0.0)
+                            weights[label] = w
+                            total_weight += w
+                        if total_weight <= 0:
+                            total_weight = float(len(weights))
+                            weights = {k: 1.0 for k in weights}
+
+                        driver_shares = {label: weights[label] / total_weight for label in weights}
+                        spend_lambda = 1.0 - float(constraint_strength)
+                        spend_lambda = min(1.0, max(0.0, spend_lambda))
+                        blended_shares = {}
+                        for label in fit_params.keys():
+                            q = spend_shares.get(label, 0.0)
+                            p = driver_shares.get(label, 0.0)
+                            blended_shares[label] = spend_lambda * q + (1.0 - spend_lambda) * p
+
+                        alloc_rows = []
+                        if use_min_constraints:
+                            min_total = sum(min_map.get(k, 0.0) for k in fit_params.keys())
+                            remaining = budget - min_total
+                            if remaining < 0:
+                                st.warning('Total minimum spend exceeds the max budget.')
+                                st.stop()
+                            adjustable = [k for k in fit_params.keys() if blended_shares.get(k, 0.0) > 0]
+                            share_sum = sum(blended_shares.get(k, 0.0) for k in adjustable)
+                            for label, (a, b) in fit_params.items():
+                                base = 0.0
+                                if share_sum > 0 and label in adjustable:
+                                    base = remaining * (blended_shares[label] / share_sum)
+                                x = min_map.get(label, 0.0) + base
+                                y = _saturation_curve(x, a, b) if x > 0 else 0.0
+                                alloc_rows.append({
+                                    'group': label,
+                                    'min_spend': min_map.get(label, 0.0),
+                                    'allocated_spend': x,
+                                    'allocated_pct': (x / budget * 100.0) if budget > 0 else 0.0,
+                                    'expected_dcfs': y,
+                                })
+                        else:
+                            for label, (a, b) in fit_params.items():
+                                x = budget * blended_shares.get(label, 0.0)
+                                y = _saturation_curve(x, a, b) if x > 0 else 0.0
+                                alloc_rows.append({
+                                    'group': label,
+                                    'min_spend': 0.0,
+                                    'allocated_spend': x,
+                                    'allocated_pct': (x / budget * 100.0) if budget > 0 else 0.0,
+                                    'expected_dcfs': y,
+                                })
+                        alloc_df_constrained = pd.DataFrame(alloc_rows)
+                        alloc_df_unconstrained = spend_df
+                        st.session_state['alloc_state'] = {
+                            'alloc_df_unconstrained': alloc_df_unconstrained,
+                            'alloc_df_constrained': alloc_df_constrained,
+                            'use_min_constraints': use_min_constraints,
+                            'use_headroom_weighting': use_headroom_weighting,
+                            'use_scale_weighting': use_scale_weighting,
+                            'use_spend_weighting': use_spend_weighting,
+                            'headroom_strength': headroom_lambda,
+                            'scale_strength': scale_lambda,
+                            'constraint_strength': constraint_strength,
+                            'budget': budget,
+                            'min_total': sum(min_map.get(k, 0.0) for k in min_map) if use_min_constraints else 0.0,
+                            'group_by': group_by or 'Group',
+                            'curve_group_by': curve_group_by or 'N/A',
+                            'filters': {
+                                'markets': opp_markets if isinstance(opp_markets, list) else [opp_markets],
+                                'channel': opp_channel,
+                                'model': opp_model,
+                                'campaign': opp_campaign,
+                            },
+                        }
+
+                    alloc_state = st.session_state.get('alloc_state')
+                    if alloc_state:
+                        alloc_df_unconstrained = alloc_state.get('alloc_df_unconstrained')
+                        alloc_df_constrained = alloc_state.get('alloc_df_constrained')
+                        st.subheader('Optimal budget split')
+                        if alloc_df_unconstrained is None or alloc_df_unconstrained.empty:
+                            st.info('No allocation available.')
+                        else:
+                            total_dcfs_unconstrained = float(alloc_df_unconstrained['expected_dcfs'].sum())
+                            total_dcfs_constrained = (
+                                float(alloc_df_constrained['expected_dcfs'].sum())
+                                if alloc_df_constrained is not None and not alloc_df_constrained.empty
+                                else None
+                            )
+                            c1, c2 = st.columns(2)
+                            c1.metric('Total DCFS (without constraints)', f'{total_dcfs_unconstrained:,.2f}')
+                            if total_dcfs_constrained is not None:
+                                c2.metric('Total DCFS (with constraints)', f'{total_dcfs_constrained:,.2f}')
+                            else:
+                                c2.metric('Total DCFS (with constraints)', 'n/a')
+                            if alloc_state.get('use_min_constraints') or alloc_state.get('use_headroom_weighting') or alloc_state.get('use_scale_weighting') or alloc_state.get('use_spend_weighting'):
+                                left = alloc_df_unconstrained.rename(columns={
+                                    'allocated_spend': 'allocated_without_constraint',
+                                    'allocated_pct': 'pct_without_constraint',
+                                    'expected_dcfs': 'dcfs_without_constraint',
+                                })[['group', 'allocated_without_constraint', 'pct_without_constraint', 'dcfs_without_constraint']]
+                                if alloc_df_constrained is not None and not alloc_df_constrained.empty:
+                                    right = alloc_df_constrained.rename(columns={
+                                        'allocated_spend': 'allocated_with_constraint',
+                                        'allocated_pct': 'pct_with_constraint',
+                                        'expected_dcfs': 'dcfs_with_constraint',
+                                    })[['group', 'allocated_with_constraint', 'pct_with_constraint', 'dcfs_with_constraint']]
+                                else:
+                                    right = pd.DataFrame({
+                                        'group': left['group'],
+                                        'allocated_with_constraint': pd.NA,
+                                        'pct_with_constraint': pd.NA,
+                                        'dcfs_with_constraint': pd.NA,
+                                    })
+                                compare_df = left.merge(right, on='group', how='outer')
+                                st.dataframe(
+                                    compare_df.sort_values('allocated_with_constraint', ascending=False, na_position='last'),
+                                    use_container_width=True,
+                                )
+                            else:
+                                st.dataframe(
+                                    alloc_df_unconstrained.sort_values('allocated_spend', ascending=False),
+                                    use_container_width=True,
+                                )
+
+                            if st.button('Generate allocation narrative', key='alloc_narrative'):
+                                filters = alloc_state.get('filters', {})
+                                markets = filters.get('markets') or []
+                                channels = []
+                                models = []
+                                campaigns = []
+                                if 'Market' in df.columns:
+                                    channels = (
+                                        df['Channel'].dropna().unique().tolist() if 'Channel' in df.columns else []
+                                    )
+                                    models = df['Model'].dropna().unique().tolist() if 'Model' in df.columns else []
+                                    campaigns = (
+                                        df['Campaign'].dropna().unique().tolist() if 'Campaign' in df.columns else []
+                                    )
+                                markets_text = ', '.join(map(str, markets)) if markets else ''
+                                channels_text = ', '.join(sorted(map(str, channels))) if channels else ''
+                                models_text = ', '.join(sorted(map(str, models))) if models else ''
+                                campaigns_text = ', '.join(sorted(map(str, campaigns))) if campaigns else ''
+
+                                table_df = None
+                                if alloc_df_unconstrained is not None and not alloc_df_unconstrained.empty:
+                                    left = alloc_df_unconstrained.rename(columns={
+                                        'allocated_spend': 'allocated_without_constraint',
+                                        'allocated_pct': 'pct_without_constraint',
+                                        'expected_dcfs': 'dcfs_without_constraint',
+                                    })[['group', 'allocated_without_constraint', 'pct_without_constraint', 'dcfs_without_constraint']]
+                                    if alloc_df_constrained is not None and not alloc_df_constrained.empty:
+                                        right = alloc_df_constrained.rename(columns={
+                                            'allocated_spend': 'allocated_with_constraint',
+                                            'allocated_pct': 'pct_with_constraint',
+                                            'expected_dcfs': 'dcfs_with_constraint',
+                                        })[['group', 'allocated_with_constraint', 'pct_with_constraint', 'dcfs_with_constraint']]
+                                        table_df = left.merge(right, on='group', how='outer')
+                                    else:
+                                        table_df = left
+                                allocation_lines = []
+                                if table_df is not None:
+                                    for _, row in table_df.sort_values('group').iterrows():
+                                        allocation_lines.append(
+                                            f"{row['group']}: "
+                                            f"unconstrained={row.get('allocated_without_constraint', 'n/a'):.2f} "
+                                            f"({row.get('pct_without_constraint', 'n/a'):.2f}%), "
+                                            f"constrained={row.get('allocated_with_constraint', float('nan')):.2f} "
+                                            f"({row.get('pct_with_constraint', float('nan')):.2f}%)"
+                                        )
+                                allocation_table_text = '\n'.join(allocation_lines) if allocation_lines else 'n/a'
+
+                                template = ALLOCATION_METHOD_TEMPLATE
+                                template = template.replace('[GROUP_BY]', str(alloc_state.get('group_by', 'Group')))
+                                template = template.replace('[MARKETS]', markets_text)
+                                template = template.replace('[CHANNELS]', channels_text)
+                                template = template.replace('[MODELS]', models_text)
+                                template = template.replace('[CAMPAIGNS]', campaigns_text)
+                                template = template.replace('[CURVE_GROUP]', str(alloc_state.get('curve_group_by', 'N/A')))
+                                template = template.replace('[HEADROOM_STRENGTH]', f"{float(alloc_state.get('headroom_strength', 0.0)):.2f}")
+                                template = template.replace('[SCALE_STRENGTH]', f"{float(alloc_state.get('scale_strength', 0.0)):.2f}")
+                                template = template.replace('[CONSTRAINT_STRENGTH]', f"{float(alloc_state.get('constraint_strength', 0.0)):.2f}")
+                                template = template.replace('[MIN_CONSTRAINT_ENABLED]', 'Yes' if alloc_state.get('use_min_constraints') else 'No')
+                                template = template.replace('[MIN_TOTAL]', f"{float(alloc_state.get('min_total', 0.0)):.2f}")
+                                template = template.replace('[BUDGET]', f"{float(alloc_state.get('budget', 0.0)):.2f}")
+                                template = template.replace('[TOTAL_DCFS_UNCONSTRAINED]', f"{total_dcfs_unconstrained:,.2f}")
+                                if total_dcfs_constrained is not None:
+                                    template = template.replace('[TOTAL_DCFS_CONSTRAINED]', f"{total_dcfs_constrained:,.2f}")
+                                else:
+                                    template = template.replace('[TOTAL_DCFS_CONSTRAINED]', 'n/a')
+                                template = template.replace('[CURVE_COUNT]', str(len(fit_params)))
+                                template = template.replace('[ALLOCATION_TABLE]', allocation_table_text)
+                                st.text_area('Allocation narrative (copy)', template, height=420)
+
+                        max_alloc = None
+                        for df_alloc in [alloc_df_unconstrained, alloc_df_constrained]:
+                            if df_alloc is not None and not df_alloc.empty:
+                                max_alloc = max(
+                                    max_alloc or 0.0,
+                                    float(df_alloc['allocated_spend'].max()),
+                                )
+                        if alloc_df_constrained is not None:
+                            alloc_rows = alloc_df_constrained.to_dict('records')
+                        else:
+                            alloc_rows = alloc_df_unconstrained.to_dict('records') if alloc_df_unconstrained is not None else []
+                        if alloc_rows:
+                            max_alloc = max(
+                                max_alloc or 0.0,
+                                max(float(r['allocated_spend']) for r in alloc_rows),
+                            )
+                max_x = float(plot_df['Media Spend'].max()) if not plot_df.empty else 0.0
+                if max_alloc is not None:
+                    max_x = max_alloc
+                if fit_params:
+                    for group_label, (a, b) in fit_params.items():
+                        x_fit = np.linspace(0, max_x, 150)
                         y_fit = _saturation_curve(x_fit, a, b)
                         curve_fig.add_trace(
                             go.Scatter(
                                 x=x_fit,
                                 y=y_fit,
                                 mode='lines',
-                                name=f'{group_label} fit',
-                                line=dict(dash='solid', color=color_map.get(group_label)),
+                                name=f'{group_label}',
+                                line=dict(width=3, color=color_map.get(group_label)),
                                 showlegend=True,
                             )
                         )
+                if alloc_rows:
+                    for row in alloc_rows:
+                        curve_fig.add_trace(
+                            go.Scatter(
+                                x=[row['allocated_spend']],
+                                y=[row['expected_dcfs']],
+                                mode='markers',
+                                name=f"{row['group']} allocation",
+                                marker=dict(
+                                    size=10,
+                                    symbol='x',
+                                    color=color_map.get(row['group']),
+                                ),
+                                showlegend=False,
+                            )
+                        )
+                curve_fig.update_layout(
+                    xaxis_title='Media Spend',
+                    yaxis_title='DCFS',
+                    legend_title_text=group_by or 'Group',
+                )
+                curve_fig.update_xaxes(range=[0, max_x])
+                curve_fig.update_yaxes(range=[0, None])
                 st.plotly_chart(curve_fig, use_container_width=True)
                 if fit_rows:
                     st.subheader('Media response fit parameters (A, B)')

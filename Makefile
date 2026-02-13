@@ -2,7 +2,7 @@ IMAGE_NAME ?= intelligence-hub
 PORT ?= 8501
 ENV_FILE ?= .env
 
-.PHONY: docker-build docker-run docker-run-mount docker-clean
+.PHONY: docker-build docker-run docker-run-mount docker-clean report-pdf
 
 # Build Docker image
 
@@ -30,3 +30,10 @@ docker-run-mount:
 
 docker-clean:
 	docker rmi -f $(IMAGE_NAME)
+
+# Build PDF from the markdown report
+report-pdf:
+	pandoc reports/close_the_gap_800k_iter_00.md \
+		--resource-path=reports \
+		--from markdown+implicit_figures \
+		-o reports/close_the_gap_800k_iter_00.pdf
