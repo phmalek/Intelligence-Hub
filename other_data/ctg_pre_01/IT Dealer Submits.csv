@@ -1,0 +1,41 @@
+# ----------------------------------------
+# 0 | GLOBAL | ALL
+# Manual Campaign Name + CFS-IT Dealer Submits
+# 20250301-20250531
+# ----------------------------------------
+
+,Event name,carsales_dealercontactsubmitted_oph,xcc_dealercontactsubmitted_oph,pcom_dealercontactsubmitted_oph,Totals
+country,Manual campaign name,Sessions,Sessions,Sessions,Sessions
+,,380,22,10,412,Grand total
+IT,(not set),211,4,4,219
+IT,porsche_usate,154,6,2,162
+IT,10182596_EC_PL_LAO_CNV_ECO_ECO_BRD_NA_GLB_SEAH_PSEAC_MXED_MIXED_GAD_GADW_CPC_NU_NU_NU_NU_MXD_IT_AL_MXED_10205881-VMK3DIRECT-SEAH-AWO-BRAND-IT-VXD,12,5,1,18
+IT,IT_ITA_SR-E_GO_AC_AWOP_PE_PMAXSH__NU_NU_AWO,10,4,2,16
+IT,10182596_EC_PL_LAO_CNV_ECO_ECO_BRD_NA_GLB_SEAH_PSEAC_MXED_MIXED_GAD_GADW_CPC_NU_NU_NU_NU_MXD_IT_AL_MXED_10205919-VMK3DIRECT-PMAX-AWO-GENERAL-IT-VXD,8,3,0,11
+IT,ga_cpc_stn_po_u_conversion,10,0,0,10
+IT,(referral),6,0,1,7
+IT,ga_cpc_stn_po_n_conversion_cayenne,5,1,0,6
+IT,10182596_EC_PL_LAO_CNV_ECO_ECO_BRD_NA_GLB_SEAH_PSEAC_MXED_MIXED_GAD_GADW_CPC_NU_NU_NU_NU_MXD_IT_AL_MXED_10205902-VMK3DIRECT-SEAH-AWO-BRANDVXD-IT-VXD,5,0,0,5
+IT,porsche-usato-generico_smilenet,1,4,0,5
+IT,IT_ITA_SR-E_GO_AC_AWOP_PE_SN_Brand_NU_NU_AWO,3,0,0,3
+IT,10028541_EC_PL_SLS_ECO_ECO_BRD_GLB_NU_SEAH_PSEAC_DRT_MXED_MIXED_GAD_GADW_CPC_NU_NU_MIXD_NU_MXD_IT_AL_MXED_VMK3Direct-PMAX-AWO-General-IT-VXD-NU-10088369,0,2,0,2
+IT,ga_cpc_stn_po_n_conversion_718,1,1,0,2
+IT,porsche_usato_ancona,1,0,1,2
+IT,10028541_EC_PL_SLS_ECO_ECO_BRD_GLB_NU_SEAH_PSEAC_DRT_MXED_MIXED_GAD_GADW_CPC_NU_NU_MIXD_NU_MXD_IT_AL_MXED_VMK3Direct-SEAH-AWO-Brand-IT-VXD-NU-10088368,1,0,0,1
+IT,10195846_EC_PL_LAO_CNV_ECO_CHH_CHH_NA_GLB_SEAH_PSEAC_PFMX_NU_GAD_GADW_CPC_NU_NU_NU_NU_MXD_DE_AL_BRAP_10205949-VMK3DIRECT-PMAX-AWO-LHW-CHDE-VXD,1,0,0,1
+IT,10195846_EC_PL_LAO_CNV_ECO_CHH_CHH_NA_GLB_SEAH_PSEAC_SHAD_NU_GAD_GADW_CPC_NU_NU_NU_NU_MXD_IT_AL_BRAP_10205953-VMK3DIRECT-SHOP-AWO-LHW-IT-VXD,1,0,0,1
+IT,120226176037530595,1,0,0,1
+IT,531573,1,0,0,1
+IT,IT_ITA_SR-E_BI_AC_AWOP_PE_SN_Brand_NU_NU_AWO,1,0,0,1
+IT,_2025AON-finder_,1,0,0,1
+IT,_macancitylife2025_,0,0,1,1
+IT,ga_cpc_bst_po_n_conversion_macan_elettrica,1,0,0,1
+IT,ga_cpc_stn_po_n_conversion_macan_elettrica,0,1,0,1
+IT,ga_cpc_stn_po_n_conversion_taycan,1,0,0,1
+IT,ga_cpc_stn_po_u_conversion_macan,0,1,0,1
+IT,ga_cpc_stn_po_u_conversion_taycan,0,1,0,1
+IT,porsche-panamera_smilenet,0,1,0,1
+IT,porsche-taycan-usato_smilenet,0,1,0,1
+IT,porsche_usato_cesena,0,1,0,1
+IT,porsche_usato_pesaro,1,0,0,1
+

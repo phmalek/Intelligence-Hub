@@ -1,0 +1,41 @@
+# ----------------------------------------
+# 0 | GLOBAL | ALL
+# Manual Campaign Name + CFS-GB Dealer Submits
+# 20250301-20250531
+# ----------------------------------------
+
+,Event name,carsales_dealercontactsubmitted_oph,xcc_dealercontactsubmitted_oph,pcom_dealercontactsubmitted_oph,Totals
+country,Manual campaign name,Sessions,Sessions,Sessions,Sessions
+,,240,87,2,329,Grand total
+GB,(not set),52,22,1,75
+GB,_model-taycan_,38,18,1,57
+GB,_brand-only_,39,14,0,53
+GB,_brand_,27,11,0,38
+GB,_model-cayenne_,12,11,0,23
+GB,UK_ENG_SR-E_GO_AC_AWOP_PE_PMAXSH__NU_NU_AWO,16,5,0,21
+GB,_brandocs_,12,0,0,12
+GB,UK_ENG_SR-E_BI_AC_AWOP_PE_SN_Brand_NU_NU_AWO,8,2,0,10
+GB,10182596_EC_PL_LAO_CNV_ECO_ECO_BRD_NA_GLB_SEAH_PSEAC_MXED_MIXED_MAD_BING_CPC_NU_NU_NU_NU_MXD_EN_AL_MXED_10205890-VMK3-BRVXD-UK,4,5,0,9
+GB,_model-panamera_,9,0,0,9
+GB,10182596_EC_PL_LAO_CNV_ECO_ECO_BRD_NA_GLB_SEAH_PSEAC_MXED_MIXED_GAD_GADW_CPC_NU_NU_NU_NU_MXD_EN_AL_MXED_10205908-VMK3DIRECT-PMAX-AWO-GENERALT1-UK-VXD,8,0,0,8
+GB,10182596_EC_PL_LAO_CNV_ECO_ECO_BRD_NA_GLB_SEAH_PSEAC_MXED_MIXED_MAD_BING_CPC_NU_NU_NU_NU_MXD_EN_AL_MXED_10205142-VMK3-BRAND-UK,3,3,0,6
+GB,10182596_EC_PL_LAO_CNV_ECO_ECO_BRD_NA_GLB_SEAH_PSEAC_MXED_MIXED_GAD_GADW_CPC_NU_NU_NU_NU_MXD_EN_AL_MXED_10205143-VMK3DIRECT-SEAH-AWO-BRAND-UK-VXD,5,0,0,5
+GB,_panamera-ehybrid_,5,0,0,5
+GB,(referral),3,0,0,3
+GB,10182596_EC_PL_LAO_CNV_ECO_ECO_BRD_NA_GLB_SEAH_PSEAC_MXED_MIXED_GAD_GADW_CPC_NU_NU_NU_NU_MXD_EN_AL_MXED_10205891-VMK3DIRECT-SEAH-AWO-BRANDVXD-UK-VXD,2,0,0,2
+GB,10195846_EC_PL_LAO_CNV_ECO_CHH_CHH_NA_GLB_SEAH_PSEAC_PFMX_NU_GAD_GADW_CPC_NU_NU_NU_NU_MXD_EN_AL_BRAP_10205958-VMK3DIRECT-PMAX-AWO-LHW-UK-VXD,2,0,0,2
+GB,Novi--Porsche-Centre-South-Lakes--Brand--EXACT,0,2,0,2
+GB,_2025AON-finder_,2,0,0,2
+GB,10028541_EC_PL_SLS_ECO_ECO_BRD_GLB_NU_SEAH_PSEAC_DRT_MXED_MIXED_GAD_GADW_CPC_NU_NU_MIXD_NU_MXD_EN_AL_MXED_VMK3Direct-PMAX-AWO-GeneralT2-UK-VXD-NU-10088384,1,0,0,1
+GB,DE_GER_SR-E_GO_AC_AWOP_PE_PMAXSH_P2_NU_NU_AWO,1,0,0,1
+GB,GOBI_CPC_NU_NU_MIXD_NU_MXD_EN_AL_MXED_VMK3Direct-SEAH-AWO-Brand-UK-VXD-NU,1,0,0,1
+GB,LM | PORSCHE | AFTERSALES,1,0,0,1
+GB,Novi--sitelink,1,0,0,1
+GB,UK_ENG_SR-E_GO_AC_AWOP_PE_SN_Brand_NU_NU_AWO,1,0,0,1
+GB,_2025AON-configurator-macanelectric25_,1,0,0,1
+GB,macan ev,1,0,0,1
+GB,novi---porche-centre-south-lakes---brand---exact,1,0,0,1
+GB,novi---porsche-centre-south-lakes---911---new---exact,0,1,0,1
+GB,novi---porsche-centre-south-lakes---911---new---phrase,1,0,0,1
+GB,novi---porsche-centre-south-lakes---taycan---new---exact,1,0,0,1
+

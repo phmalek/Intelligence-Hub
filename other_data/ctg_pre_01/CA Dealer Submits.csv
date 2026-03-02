@@ -1,0 +1,42 @@
+# ----------------------------------------
+# 0 | GLOBAL | ALL
+# Manual Campaign Name + CFS-CA Dealer Submits
+# 20250301-20250531
+# ----------------------------------------
+
+,Event name,carsales_dealercontactsubmitted_oph,xcc_dealercontactsubmitted_oph,Totals
+country,Manual campaign name,Sessions,Sessions,Sessions
+,,261,21,282,Grand total
+CA,(not set),96,12,108
+CA,BrandSearch,57,4,61
+CA,TRFFK-branding,39,2,41
+CA,TRFFK-search-car-new,20,1,21
+CA,TRFFK-search-car-used,18,1,19
+CA,DB-branding,18,0,18
+CA,TRFFK-search-branding,11,0,11
+CA,_2025AON-finder_,7,0,7
+CA,DB-search-car-used,6,0,6
+CA,DB-search-car-new,5,0,5
+CA,_2025AON-modelpage_,4,1,5
+CA,(referral),4,0,4
+CA,LBX|Used Vehicles|AutoSearch - Porsche DT - Certified Make Model Inventory,4,0,4
+CA,_2025finder_,3,0,3
+CA,brand,3,0,3
+CA,dealership,3,0,3
+CA,LBX|New Vehicles|AutoSearch - Porsche DT - New Dealer Branded,2,0,2
+CA,LBX|New Vehicles|AutoSearch - Porsche DT - New Make Inventory,2,0,2
+CA,LBX|Used Vehicles|AutoSearch - Porsche DT - Certified Make Inventory,2,0,2
+CA,TRFFK-pmax-new-promo,2,0,2
+CA,TRFFK-service,2,0,2
+CA,_2025AON-finder-cpo_,2,0,2
+CA,gmb_listing,2,0,2
+CA,100013634,1,0,1
+CA,Brand_627291243,1,0,1
+CA,LBX|New Vehicles|AutoSearch - Porsche DT - New 911,1,0,1
+CA,LBX|New Vehicles|AutoSearch - Porsche DT - New Macan,1,0,1
+CA,LBX|New Vehicles|AutoSearch - Porsche DT - New Make Model Inventory,1,0,1
+CA,TRFFK-performance-max-promo,1,0,1
+CA,_2025AON-configurator_,1,0,1
+CA,google_my_business,1,0,1
+CA,home,1,0,1
+

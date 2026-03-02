@@ -3,98 +3,82 @@
 
 ---
 
-## 1. Scope  
+## Scope  
 
-| Dimension | Coverage |
-|------------|----------|
-| **Markets** | PCA, PCGB, PCH, PCL, PD, PIB Por, PIB Spa, PIT, PKO, PNO, POF, PPL, PTW, TRK |
-| **Channels** | Paid Search, Paid Social |
-| **Models** | Cayenne, Macan, Panamera, Taycan, Range (Mixed) |
-| **Campaigns** | Panamera & Cayenne Close the Gap, Winning BEV Close the Gap |
-| **Time Basis** | Calendar week |
+This allocation covers 14 markets: PCA, PCGB, PCH, PCL, PD, PIB Por, PIB Spa, PIT, PKO, PNO, POF, PPL, PTW and TRK.
+
+The analysis includes Paid Search and Paid Social activity across Cayenne, Macan, Panamera, Taycan and mixed range campaigns within Panamera & Cayenne Close the Gap and Winning BEV Close the Gap.
+
+All modelling is based on weekly performance data.
 
 ---
 
-## 2. Allocation Framework  
+## Allocation Logic  
 
-Budget distribution is determined by three performance drivers.
+Budget decisions are based on two primary drivers in this scenario:
 
-| Driver | Description | Purpose |
-|----------|-------------|-----------|
-| **Spend Response** | Market-specific response curves based on historical DCFS vs spend | Identifies incremental return potential and avoids saturation |
-| **Efficiency Headroom** | Current CPL vs benchmark (25th percentile reference) | Detects efficiency improvement opportunity |
-| **Scale** | Recent DCFS volume ranking within channel | Assesses market capacity to absorb additional investment |
+**Incremental return** – historical DCFS response to incremental spend, accounting for diminishing returns.  
+**Scale** – recent DCFS volume as a proxy for a market’s ability to absorb additional investment.
 
-The final allocation blends performance optimisation and strategic steering.
+Efficiency headroom weighting is set to zero in this configuration.
 
-![Efficiency headroom by market (higher = more CPL improvement potential).](headroom.png)
+The final allocation blends pure optimisation with scale-based steering (50% / 50%).  
+Minimum spend logic is enabled. No maximum caps are applied.
 
-![Scale score by market (relative recent DCFS capacity within channel).](scale.png)
+---
 
-| Parameter | Setting |
-|------------|----------|
-| Headroom Strength | 1.00 |
+## Key Parameters  
+
+| Item | Value |
+|------|-------|
+| Total Budget | €50,000 |
+| Headroom Strength | 0.00 |
 | Scale Strength | 1.00 |
-| Constraint Strength | 0.50 (50% optimisation / 50% steering) |
+| Constraint Strength | 0.50 |
 | Minimum Spend Applied | Yes |
-| Minimum Spend Total | €70,000 |
-| Total Budget | €800,000 |
-| Curves Fitted | 14 |
+| Maximum Caps Applied | No |
+| Markets Modelled | 14 |
 
 ---
 
-## 3. Impact Comparison  
+## Impact Comparison  
 
 | Scenario | Projected DCFS |
-|------------|----------------|
-| Pure Spend Optimisation | 722.27 |
-| Balanced Allocation | 568.26 |
+|-----------|----------------|
+| Pure Optimisation (Unconstrained) | 120.58 |
+| Blended Allocation (Constrained) | 84.24 |
 
-Pure optimisation would concentrate nearly 90% of budget in a single market.  
-The balanced allocation distributes investment while preserving primary growth engines.
-
----
-
-## 4. Final Budget Distribution  
-
-![Final budget allocation overlaid on spend response curves.](budget_split.png)
-
-| Market | Allocation (€) | Share |
-|----------|---------------|--------|
-| **PIB Por** | 334,823.99 | 41.85% |
-| **TRK** | 80,242.53 | 10.03% |
-| **POF** | 65,059.46 | 8.13% |
-| **PCGB** | 48,889.75 | 6.11% |
-| **PKO** | 47,356.19 | 5.92% |
-| **PNO** | 40,058.69 | 5.01% |
-| **PIT** | 38,904.90 | 4.86% |
-| **PCL** | 37,223.87 | 4.65% |
-| **PIB Spa** | 28,365.55 | 3.55% |
-| **PCA** | 24,832.66 | 3.10% |
-| **PD** | 22,995.85 | 2.87% |
-| **PCH** | 12,945.46 | 1.62% |
-| **PPL** | 12,884.32 | 1.61% |
-| **PTW** | 5,416.77 | 0.68% |
-| **Total** | **800,000.00** | **100%** |
+Pure optimisation would concentrate heavily in TRK and PKO.  
+The blended model redistributes investment while retaining the strongest performance drivers.
 
 ---
 
-## 5. Allocation Interpretation  
+## Budget Allocation by Market  
 
-PIB Por remains the primary investment focus due to strong scale and return capacity.  
-TRK and POF represent the next largest expansion opportunities.  
-PCGB, PKO and PNO reflect clear efficiency and scale balance.  
-Smaller markets retain controlled presence to support performance development and learning.
+| Market   | Unconstrained (€) | Unconstrained Share | Constrained (€) | Constrained Share |
+|-----------|------------------|---------------------|-----------------|-------------------|
+| TRK       | 34,367.37 | 68.73% | 11,399.16 | 22.80% |
+| PD        | 0.00      | 0.00%  | 21,324.20 | 42.65% |
+| PKO       | 11,231.44 | 22.46% | 5,177.90  | 10.36% |
+| PIT       | 4,265.75  | 8.53%  | 2,667.06  | 5.33%  |
+| PIB Spa   | 0.00      | 0.00%  | 1,890.39  | 3.78%  |
+| PNO       | 0.00      | 0.00%  | 1,535.73  | 3.07%  |
+| POF       | 0.00      | 0.00%  | 1,442.79  | 2.89%  |
+| PCGB      | 0.00      | 0.00%  | 1,424.20  | 2.85%  |
+| PCA       | 0.00      | 0.00%  | 1,349.85  | 2.70%  |
+| PCL       | 0.00      | 0.00%  | 1,349.85  | 2.70%  |
+| PCH       | 135.43    | 0.27%  | 138.87    | 0.28%  |
+| PIB Por   | 0.00      | 0.00%  | 100.00    | 0.20%  |
+| PPL       | 0.00      | 0.00%  | 100.00    | 0.20%  |
+| PTW       | 0.00      | 0.00%  | 100.00    | 0.20%  |
+| **Total** | **50,000** | **100%** | **50,000** | **100%** |
 
 ---
 
-## 6. Summary  
+## Interpretation  
 
-The €800,000 allocation reflects:
+Under pure optimisation, nearly 70% of the budget would flow into TRK and over 20% into PKO.
 
-- Incremental return potential  
-- Efficiency improvement opportunity  
-- Market scalability  
-- Controlled concentration risk  
+With constraints applied, PD becomes the largest allocation (42.65%), followed by TRK (22.80%) and PKO (10.36%), reflecting the blend of scale weighting and redistribution.
 
-The framework allows recalibration as performance evolves while maintaining structured capital deployment across markets.
+The allocation preserves performance concentration where justified, while broadening market participation within the €50,000 framework.
