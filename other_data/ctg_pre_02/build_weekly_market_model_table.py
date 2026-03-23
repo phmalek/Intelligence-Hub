@@ -14,9 +14,8 @@ Sheets:
 
 Each sheet contains weekly blocks:
   - A numeric Excel date serial in column A marks a week boundary.
-  - Column B contains the weekly total value for that week.
-  - Following rows list campaign-level details. We infer model from column A
-    (macan, cayenne, taycan, panamera, 911, 718) and aggregate per model.
+  - Date rows are not campaign rows and are only used to set the current week.
+  - Every non-date row is ingested and attached to the current week.
 
 Output schema:
   market,model,channel,week,icc_dcfs,model_dcfs,finder_dcfs,dcfs,spend
@@ -25,7 +24,7 @@ Rules:
   - Conversion is DCFS → stored in icc_dcfs, and dcfs mirrors icc_dcfs.
   - model_dcfs and finder_dcfs are NaN (not available in this dataset).
   - channel is always "paid search".
-  - model is inferred from campaign strings; non‑matching rows are ignored.
+  - model is inferred from campaign strings; non‑matching rows are labeled "none".
 """
 from __future__ import annotations
 
@@ -163,15 +162,13 @@ def main():
             "PCL": "CANADA",
         }
         for sheet_name, sheet_path in sheet_files.items():
-            if not sheet_name.endswith(("Conv", "Costs")):
+            if not sheet_name.endswith(("Conv", "Cost", "Costs")):
                 continue
             market_code = sheet_name.split()[0].upper()
             market = market_name_map.get(market_code, market_code)
             metric = "icc_dcfs" if sheet_name.endswith("Conv") else "spend"
             rows = _parse_sheet_rows(zf, sheet_path, shared_strings)
             current_week = None
-            week_totals = {}
-            model_seen = set()
             for row in rows:
                 a = row.get("A")
                 b = row.get("B")
@@ -184,10 +181,6 @@ def main():
                     a_num = None
                 if a_num is not None and a_num >= 40000:
                     current_week = _excel_serial_to_week(a_num)
-                    try:
-                        week_totals[current_week] = float(b)
-                    except Exception:
-                        week_totals[current_week] = None
                     continue
                 if current_week is None:
                     continue
@@ -197,28 +190,13 @@ def main():
                     continue
                 model = _infer_model(a)
                 if model is None:
-                    continue
+                    model = "none"
                 records.append({
                     "market": market,
                     "model": model,
                     "channel": "Paid Search",
                     "week": current_week,
                     metric: b_num,
-                })
-                model_seen.add(current_week)
-
-            # If a week has no model-specific rows, fall back to the weekly total
-            for week, total_val in week_totals.items():
-                if week in model_seen:
-                    continue
-                if total_val is None:
-                    continue
-                records.append({
-                    "market": market,
-                    "model": "none",
-                    "channel": "Paid Search",
-                    "week": week,
-                    metric: total_val,
                 })
 
     if not records:

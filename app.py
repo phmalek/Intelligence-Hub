@@ -2,7 +2,7 @@ from io import BytesIO
 from pathlib import Path
 import os
 import re
-import hmac
+import subprocess
 from datetime import datetime
 from typing import Optional
 
@@ -32,6 +32,9 @@ base_dir_env = os.getenv('APP_BASE_DIR')
 BASE_DIR = Path(base_dir_env) if base_dir_env else Path(__file__).resolve().parent
 CSV_PATH = BASE_DIR / 'pwc reports' / 'outputs' / 'python_output_all.csv'
 LOGO_PATH = BASE_DIR / 'porsche_logo.png'
+UTM_NOTES_PDF_PATH = BASE_DIR / 'UTM_data' / 'Porsche_UTM Adoption Notes_Feb2026.pdf'
+UTM_NOTES_CSV_PATH = BASE_DIR / 'UTM_data' / 'Porsche_UTM Adoption Notes_Feb2026.csv'
+ADDRESSBOOK_CSV_PATH = BASE_DIR / 'UTM_data' / 'PHD_Local_Market_Addressbook.csv'
 
 st.set_page_config(page_title='Intelligence Console', layout='wide')
 
@@ -273,20 +276,22 @@ CTG_PRE_POST_TEMPLATE = (
 CTG_PRE_POST_TEMPLATE_COPY = (
     "CTG Pre/Post Analysis Narrative (ctg_pre + Overview Post)\n"
     "Scope\n"
-    "- Pre data source: other_data/ctg_pre_02/weekly_market_model_table.csv\n"
-    "- Post data source: pwc reports/outputs/python_output_all.csv (overview dataset)\n"
+    "- Pre data source: other_data/ctg_pre_02/matched_campaign_date_stats_pre_ctg.csv\n"
+    "- Post data source: other_data/ctg_pre_02/matched_campaign_date_stats_post_ctg.csv\n"
+    "- Market selection: [MARKETS]\n"
     "- Model selection: [MODEL]\n"
     "- Channel selection: [CHANNEL]\n"
     "- Pre‑CTG window: weeks [X_START]–23\n"
     "- Pre data cutoff: week start date before 2025-05-01\n"
-    "- Post window: all weeks available in overview dataset\n\n"
+    "- Post window: all weeks available in post CSV\n\n"
     "Input Data Schemas\n"
-    "Pre columns used: market, model, channel, week, icc_dcfs, spend\n"
-    "Post columns used: Market, Model, Channel, ICC DCFS, Media Spend\n\n"
+    "Pre columns used: market, model, channel, week, spend, conv\n"
+    "Post columns used: market, model, channel, week, spend, conv\n"
+    "- Conversion metric used in both pre/post = dcfs = conv\n\n"
     "Filtering\n"
-    "- Pre: filter by selected model and channel.\n"
-    "- Post: filter by selected model and channel (case‑insensitive model match).\n"
-    "- Market mapping applied to align labels: CANADA→PCL, UK→PCGB, GERMANY→PD.\n\n"
+    "- Pre: filter by selected markets, selected models, selected channel.\n"
+    "- Post: filter by selected markets, selected models, selected channel.\n"
+    "- Market mapping applied before filtering: CANADA→PCL, UK→PCGB, GERMANY→PD, FRANCE→POF, ITALY→PIT.\n\n"
     "Week Parsing (Pre only)\n"
     "- week label format: YYYY‑WW\n"
     "- week_num = integer WW extracted from week label\n"
@@ -296,15 +301,15 @@ CTG_PRE_POST_TEMPLATE_COPY = (
     "Metric Construction\n"
     "1) Pre (per market m):\n"
     "   - spend_sum_m = sum(spend) over pre weeks\n"
-    "   - dcfs_sum_m = sum(icc_dcfs) over pre weeks\n"
+    "   - dcfs_sum_m = sum(dcfs) over pre weeks\n"
     "   - cost_per_dcfs_m = spend_sum_m / dcfs_sum_m\n"
-    "2) Post (per market m, overview totals):\n"
-    "   - spend_sum_m = sum(Media Spend)\n"
-    "   - dcfs_sum_m = sum(ICC DCFS)\n"
+    "2) Post (per market m, post CSV totals):\n"
+    "   - spend_sum_m = sum(spend)\n"
+    "   - dcfs_sum_m = sum(dcfs)\n"
     "   - cost_per_dcfs_m = spend_sum_m / dcfs_sum_m\n"
     "3) Global Post:\n"
-    "   - total_spend = sum(Media Spend) across all markets\n"
-    "   - total_dcfs = sum(ICC DCFS) across all markets\n"
+    "   - total_spend = sum(spend) across selected markets\n"
+    "   - total_dcfs = sum(dcfs) across selected markets\n"
     "   - global_cost_per_dcfs = total_spend / total_dcfs\n\n"
     "Pre/Post Summary Table (GLOBAL)\n"
     "[SUMMARY_TABLE]\n\n"
@@ -383,88 +388,6 @@ INCENTIVE_METHOD_TEMPLATE = (
     "- All numbers are derived from the currently filtered points.\n"
     "- Changing cadence, filters, or benchmark recomputes all metrics.\n"
 )
-
-def _load_auth_users() -> dict:
-    raw_users = os.getenv('APP_AUTH_USERS', '').strip()
-    if raw_users:
-        users = {}
-        for item in raw_users.split(','):
-            item = item.strip()
-            if not item or ':' not in item:
-                continue
-            username, password = item.split(':', 1)
-            username = username.strip()
-            password = password.strip()
-            if username and password:
-                users[username] = password
-        return users
-
-    single_user = os.getenv('APP_AUTH_USER', '').strip()
-    single_pass = os.getenv('APP_AUTH_PASSWORD', '').strip()
-    return {single_user: single_pass} if single_user and single_pass else {}
-
-
-def _verify_credentials(username: str, password: str, users: dict) -> bool:
-    if not username or not password:
-        return False
-    stored = users.get(username, '')
-    return hmac.compare_digest(password, stored)
-
-
-def _render_auth_header():
-    if LOGO_PATH.exists():
-        cols = st.columns([1, 2, 1])
-        with cols[1]:
-            st.image(str(LOGO_PATH), width=260)
-    st.markdown(
-        """
-        <div style="text-align:center; margin-top: 6px;">
-          <div style="font-size: 28px; font-weight: 700;">Authentication Required</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def require_auth():
-    users = _load_auth_users()
-    if not users:
-        st.error(
-            'Authentication is not configured. Set APP_AUTH_USERS (user:pass,...) '
-            'or APP_AUTH_USER and APP_AUTH_PASSWORD in the environment.'
-        )
-        st.stop()
-
-    if st.session_state.get('authenticated'):
-        with st.sidebar:
-            if LOGO_PATH.exists():
-                st.image(str(LOGO_PATH), width=200)
-            st.caption(f"Signed in as {st.session_state.get('auth_user', 'user')}")
-            if st.button('Logout'):
-                st.session_state['authenticated'] = False
-                st.session_state['auth_user'] = None
-                st.rerun()
-        return
-
-    _render_auth_header()
-    left, center, right = st.columns([1, 2, 1])
-    with center:
-        with st.form('login_form'):
-            username = st.text_input('Username')
-            password = st.text_input('Password', type='password')
-            submitted = st.form_submit_button('Sign in')
-    if submitted:
-        if _verify_credentials(username, password, users):
-            st.session_state['authenticated'] = True
-            st.session_state['auth_user'] = username
-            st.success('Authenticated.')
-            st.rerun()
-        else:
-            st.error('Invalid username or password.')
-    st.stop()
-
-
-require_auth()
 
 @st.cache_data
 def load_data(csv_path: Path, mtime: float):
@@ -644,6 +567,165 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Python Output (cleaned)')
     return output.getvalue()
+
+
+_UTM_MARKET_RE = re.compile(r'^([A-Z]{3,5})(?: \((.+)\))?$')
+_UTM_SECTION_RE = re.compile(
+    r'^(Status|Issues identified|Next steps|Context|Scope gaps|Observations):\s*(.*)$'
+)
+_UTM_SECTION_MAP = {
+    'Status': 'Status',
+    'Issues identified': 'Issues Identified',
+    'Next steps': 'Next Steps',
+    'Context': 'Context',
+    'Scope gaps': 'Scope Gaps',
+    'Observations': 'Observations',
+}
+
+
+def _utm_is_market_header(line: str) -> bool:
+    match = _UTM_MARKET_RE.match(line)
+    if not match:
+        return False
+    return match.group(1) not in {'Status', 'Context'}
+
+
+def _utm_new_record(code: str, name: Optional[str] = None) -> dict:
+    return {
+        'Market Code': code,
+        'Market Name': name or '',
+        'Status': [],
+        'Scope Gaps': [],
+        'Observations': [],
+        'Issues Identified': [],
+        'Context': [],
+        'Next Steps': [],
+    }
+
+
+def _utm_append_to_section(record: dict, section: str, text: str) -> None:
+    cleaned = ' '.join(text.split()).strip()
+    if not cleaned:
+        return
+    bucket = record[section]
+    if bucket:
+        bucket[-1] = f"{bucket[-1]} {cleaned}".strip()
+    else:
+        bucket.append(cleaned)
+
+
+def _utm_parse_notes_text(raw_text: str) -> pd.DataFrame:
+    lines = []
+    for raw_line in raw_text.replace('\x0c', '\n').splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line == 'Confidential - Not for Public Consumption or Distribution':
+            continue
+        lines.append(line)
+
+    records = []
+    current = None
+    current_section = None
+    idx = 0
+
+    while idx < len(lines):
+        line = lines[idx]
+
+        market_match = _UTM_MARKET_RE.match(line)
+        if market_match and _utm_is_market_header(line):
+            if current is not None:
+                records.append(current)
+            current = _utm_new_record(market_match.group(1), market_match.group(2))
+            current_section = None
+            idx += 1
+            continue
+
+        if current is None:
+            idx += 1
+            continue
+
+        if line == '•':
+            idx += 1
+            continue
+
+        section_match = _UTM_SECTION_RE.match(line)
+        if section_match:
+            current_section = _UTM_SECTION_MAP[section_match.group(1)]
+            remainder = section_match.group(2).strip()
+            if remainder:
+                current[current_section].append(remainder)
+            idx += 1
+            continue
+
+        if line == 'o' and current_section:
+            bullet_parts = []
+            idx += 1
+            while idx < len(lines):
+                candidate = lines[idx]
+                if candidate in {'•', 'o'}:
+                    break
+                if _UTM_SECTION_RE.match(candidate):
+                    break
+                if _utm_is_market_header(candidate):
+                    break
+                bullet_parts.append(candidate)
+                idx += 1
+            if bullet_parts:
+                current[current_section].append(' '.join(bullet_parts))
+            continue
+
+        if current_section:
+            _utm_append_to_section(current, current_section, line)
+
+        idx += 1
+
+    if current is not None:
+        records.append(current)
+
+    formatted_rows = []
+    for record in records:
+        formatted_rows.append({
+            'Market Code': record['Market Code'],
+            'Market Name': record['Market Name'],
+            'Status': ' '.join(record['Status']).strip(),
+            'Scope Gaps': '\n'.join(f"- {item}" for item in record['Scope Gaps']),
+            'Observations': '\n'.join(f"- {item}" for item in record['Observations']),
+            'Issues Identified': '\n'.join(f"- {item}" for item in record['Issues Identified']),
+            'Context': '\n'.join(f"- {item}" for item in record['Context']),
+            'Next Steps': '\n'.join(f"- {item}" for item in record['Next Steps']),
+        })
+
+    return pd.DataFrame(formatted_rows)
+
+
+@st.cache_data
+def load_utm_adoption_notes(pdf_path: str, mtime: float) -> pd.DataFrame:
+    result = subprocess.run(
+        ['mutool', 'draw', '-F', 'txt', '-o', '-', pdf_path],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return _utm_parse_notes_text(result.stdout)
+
+
+def load_or_create_utm_adoption_notes_csv(pdf_path: Path, csv_path: Path) -> pd.DataFrame:
+    if csv_path.exists():
+        return pd.read_csv(csv_path).fillna('')
+
+    base_df = load_utm_adoption_notes(str(pdf_path), pdf_path.stat().st_mtime).fillna('')
+    base_df.to_csv(csv_path, index=False)
+    return base_df
+
+
+def save_utm_adoption_notes_csv(df: pd.DataFrame, csv_path: Path) -> None:
+    df.fillna('').to_csv(csv_path, index=False)
+
+
+@st.cache_data
+def load_market_addressbook_csv(csv_path: str, mtime: float) -> pd.DataFrame:
+    return pd.read_csv(csv_path).fillna('')
 
 
 def _pdf_escape(text: str) -> str:
@@ -1134,6 +1216,7 @@ with st.sidebar:
             'Market Report - Excel Export',
             'KPI vs Investment',
             'Market Alignments',
+            'UTM Adoption',
             'Incentive Model',
             'Weekly Market KPIs',
             'CTG Pre/Post KPI per Session',
@@ -1395,6 +1478,15 @@ with st.sidebar:
         campaign = None
         top_n = None
     elif page == 'Market Alignments':
+        metric = None
+        agg_func = None
+        filtered = None
+        model_df = None
+        market = None
+        campaign = None
+        top_n = None
+        kpi_filters = None
+    elif page == 'UTM Adoption':
         metric = None
         agg_func = None
         filtered = None
@@ -3725,6 +3817,172 @@ if page == 'Market Alignments':
     st.session_state['market_addressbook'] = addressbook_df
     st.stop()
 
+if page == 'UTM Adoption':
+    st.subheader('UTM Adoption')
+    st.caption('Workspace for tracking market-level UTM rollout and compliance.')
+    if not UTM_NOTES_PDF_PATH.exists():
+        st.error(f'UTM notes PDF not found at `{UTM_NOTES_PDF_PATH}`.')
+        st.stop()
+
+    base_utm_notes_df = load_utm_adoption_notes(str(UTM_NOTES_PDF_PATH), UTM_NOTES_PDF_PATH.stat().st_mtime).fillna('')
+    persisted_utm_notes_df = load_or_create_utm_adoption_notes_csv(UTM_NOTES_PDF_PATH, UTM_NOTES_CSV_PATH)
+    if 'utm_adoption_notes_working' not in st.session_state:
+        st.session_state['utm_adoption_notes_working'] = persisted_utm_notes_df.copy()
+    utm_notes_df = st.session_state['utm_adoption_notes_working']
+
+    top_left, top_mid, top_right, top_reset = st.columns([1, 1, 3, 1])
+    with top_left:
+        st.metric('Markets', len(utm_notes_df))
+    with top_mid:
+        populated_status = utm_notes_df['Status'].fillna('').astype(str).str.strip().ne('').sum()
+        st.metric('Statuses Captured', int(populated_status))
+    with top_right:
+        st.caption(f'Source: `{UTM_NOTES_CSV_PATH}`')
+        st.caption('Edits are only written to CSV when you press `Save Changes`.')
+    with top_reset:
+        if st.button('Reset Table', key='utm_reset_table'):
+            st.session_state['utm_adoption_notes_working'] = base_utm_notes_df.copy()
+            save_utm_adoption_notes_csv(base_utm_notes_df, UTM_NOTES_CSV_PATH)
+            st.rerun()
+
+    market_options = ['All'] + utm_notes_df['Market Code'].dropna().astype(str).tolist()
+    selected_market = st.selectbox('Market', market_options, index=0, key='utm_adoption_market')
+    search_term = st.text_input('Search notes', value='', key='utm_adoption_search')
+
+    filtered_notes = utm_notes_df.copy()
+    if selected_market != 'All':
+        filtered_notes = filtered_notes[filtered_notes['Market Code'] == selected_market]
+
+    search_term = search_term.strip()
+    if search_term:
+        search_mask = filtered_notes.fillna('').apply(
+            lambda column: column.astype(str).str.contains(search_term, case=False, na=False)
+        ).any(axis=1)
+        filtered_notes = filtered_notes[search_mask]
+
+    filtered_notes = filtered_notes.copy()
+    editable_cols = ['Market Name', 'Status', 'Scope Gaps', 'Observations', 'Issues Identified', 'Context', 'Next Steps']
+    with st.form('utm_adoption_form'):
+        edited_notes = st.data_editor(
+            filtered_notes,
+            use_container_width=True,
+            hide_index=True,
+            height=700,
+            disabled=['Market Code'],
+            column_config={
+                'Market Code': st.column_config.TextColumn('Market', width='small'),
+                'Market Name': st.column_config.TextColumn('Market Name', width='medium'),
+                'Status': st.column_config.TextColumn('Status', width='large'),
+                'Scope Gaps': st.column_config.TextColumn('Scope Gaps', width='large'),
+                'Observations': st.column_config.TextColumn('Observations', width='large'),
+                'Issues Identified': st.column_config.TextColumn('Issues Identified', width='large'),
+                'Context': st.column_config.TextColumn('Context', width='large'),
+                'Next Steps': st.column_config.TextColumn('Next Steps', width='large'),
+            },
+            key='utm_adoption_editor',
+        )
+        save_submitted = st.form_submit_button('Save Changes')
+
+    if save_submitted:
+        utm_notes_df.loc[edited_notes.index, editable_cols] = edited_notes[editable_cols]
+        st.session_state['utm_adoption_notes_working'] = utm_notes_df
+        save_utm_adoption_notes_csv(utm_notes_df, UTM_NOTES_CSV_PATH)
+        st.success('Saved to CSV.')
+        st.rerun()
+
+    st.download_button(
+        'Download table as CSV',
+        utm_notes_df.to_csv(index=False).encode('utf-8'),
+        file_name=UTM_NOTES_CSV_PATH.name,
+        mime='text/csv',
+        key='utm_adoption_download_csv',
+    )
+
+    st.divider()
+    st.subheader('Addressbook')
+    st.caption('Market contacts consolidated from the PHD local market workbook.')
+
+    if not ADDRESSBOOK_CSV_PATH.exists():
+        st.error(f'Addressbook CSV not found at `{ADDRESSBOOK_CSV_PATH}`.')
+        st.stop()
+
+    addressbook_df = load_market_addressbook_csv(
+        str(ADDRESSBOOK_CSV_PATH),
+        ADDRESSBOOK_CSV_PATH.stat().st_mtime,
+    )
+
+    addr_left, addr_mid, addr_right = st.columns([1, 1, 3])
+    with addr_left:
+        st.metric('Contacts', len(addressbook_df))
+    with addr_mid:
+        st.metric('Markets Covered', int(addressbook_df['market'].nunique()))
+    with addr_right:
+        st.caption(f'Source: `{ADDRESSBOOK_CSV_PATH}`')
+
+    addressbook_market_options = ['All'] + sorted(
+        market for market in addressbook_df['market'].dropna().astype(str).unique() if market.strip()
+    )
+    addressbook_section_options = ['All'] + sorted(
+        section for section in addressbook_df['section'].dropna().astype(str).unique() if section.strip()
+    )
+
+    addr_filter_left, addr_filter_mid, addr_filter_right = st.columns([1, 1, 2])
+    with addr_filter_left:
+        selected_addressbook_market = st.selectbox(
+            'Addressbook Market',
+            addressbook_market_options,
+            index=0,
+            key='utm_addressbook_market',
+        )
+    with addr_filter_mid:
+        selected_addressbook_section = st.selectbox(
+            'Section',
+            addressbook_section_options,
+            index=0,
+            key='utm_addressbook_section',
+        )
+    with addr_filter_right:
+        addressbook_search_term = st.text_input(
+            'Search contacts',
+            value='',
+            key='utm_addressbook_search',
+        ).strip()
+
+    filtered_addressbook = addressbook_df.copy()
+    if selected_addressbook_market != 'All':
+        filtered_addressbook = filtered_addressbook[filtered_addressbook['market'] == selected_addressbook_market]
+    if selected_addressbook_section != 'All':
+        filtered_addressbook = filtered_addressbook[filtered_addressbook['section'] == selected_addressbook_section]
+    if addressbook_search_term:
+        addressbook_search_mask = filtered_addressbook.fillna('').apply(
+            lambda column: column.astype(str).str.contains(addressbook_search_term, case=False, na=False)
+        ).any(axis=1)
+        filtered_addressbook = filtered_addressbook[addressbook_search_mask]
+
+    st.dataframe(
+        filtered_addressbook,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            'market': st.column_config.TextColumn('Market', width='small'),
+            'section': st.column_config.TextColumn('Section', width='small'),
+            'name': st.column_config.TextColumn('Name', width='medium'),
+            'title': st.column_config.TextColumn('Title', width='medium'),
+            'email': st.column_config.TextColumn('Email', width='medium'),
+            'notes': st.column_config.TextColumn('Notes', width='medium'),
+            'source_sheet': st.column_config.TextColumn('Source Sheet', width='small'),
+        },
+    )
+
+    st.download_button(
+        'Download addressbook as CSV',
+        filtered_addressbook.to_csv(index=False).encode('utf-8'),
+        file_name=ADDRESSBOOK_CSV_PATH.name,
+        mime='text/csv',
+        key='utm_addressbook_download_csv',
+    )
+    st.stop()
+
 if page == 'Incentive Model':
     st.subheader('Incentive Model - Market Volatility & Remuneration')
     kpi_options = [
@@ -3984,7 +4242,7 @@ This flow uses cost KPIs only. Lower is better.
         st.plotly_chart(fig, use_container_width=True)
 
     st.subheader('Volatility to alpha/beta (by market)')
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         alpha = st.number_input('Base alpha', min_value=0.0, max_value=1.0, value=0.50, step=0.01, format='%.2f')
     with c2:
@@ -4894,16 +5152,23 @@ if page == 'CTG Pre/Post KPI per Session':
 
 if page == 'CTG Pre/Post KPI per Session (Copy)':
     st.subheader('CTG Pre vs Post: Cost per DCFS (ctg_pre)')
-    data_path = BASE_DIR / 'other_data' / 'ctg_pre_02' / 'weekly_market_model_table.csv'
+    data_path = BASE_DIR / 'other_data' / 'ctg_pre_02' / 'matched_campaign_date_stats_pre_ctg.csv'
+    post_data_path = BASE_DIR / 'other_data' / 'ctg_pre_02' / 'matched_campaign_date_stats_post_ctg.csv'
     if not data_path.exists():
-        st.warning('Missing weekly_market_model_table.csv. Run the ctg_pre_02 build script first.')
+        st.warning('Missing matched_campaign_date_stats_pre_ctg.csv.')
+        st.stop()
+    if not post_data_path.exists():
+        st.warning('Missing matched_campaign_date_stats_post_ctg.csv.')
         st.stop()
 
     ctg_df = pd.read_csv(data_path)
-    required_cols = {'market', 'model', 'channel', 'week', 'spend', 'icc_dcfs'}
+    required_cols = {'market', 'model', 'week', 'spend', 'conv'}
     if not required_cols.issubset(set(ctg_df.columns)):
-        st.warning('CSV missing required columns: market, model, channel, week, spend, icc_dcfs')
+        st.warning('Pre CSV missing required columns: market, model, week, spend, conv')
         st.stop()
+    if 'channel' not in ctg_df.columns:
+        ctg_df['channel'] = 'Paid Search'
+    ctg_df['dcfs'] = ctg_df['conv']
 
     def _week_num(w):
         try:
@@ -4926,26 +5191,77 @@ if page == 'CTG Pre/Post KPI per Session (Copy)':
     cutoff_date = datetime(2025, 5, 1).date()
     ctg_df = ctg_df[ctg_df['week_start'].notna() & (ctg_df['week_start'] < cutoff_date)]
     ctg_df = ctg_df.dropna(subset=['week_num'])
-    for col in ['spend', 'icc_dcfs']:
+    for col in ['spend', 'dcfs']:
         ctg_df[col] = pd.to_numeric(ctg_df[col], errors='coerce')
 
-    c1, c2, c3, c4 = st.columns(4)
+    market_map = {
+        'CANADA': 'PCL',
+        'UK': 'PCGB',
+        'GERMANY': 'PD',
+        'FRANCE': 'POF',
+        'ITALY': 'PIT',
+    }
+    ctg_df['market'] = ctg_df['market'].astype(str)
+    ctg_df['market'] = ctg_df['market'].apply(
+        lambda m: market_map.get(m.strip().upper(), m)
+    )
+    allowed_markets = {'POF', 'PCL', 'PCGB', 'PD'}
+    ctg_df = ctg_df[ctg_df['market'].isin(allowed_markets)]
+
+    market_values = sorted(ctg_df['market'].dropna().unique().tolist())
+    market_options = ['All'] + market_values
+    if 'ctg_copy_markets' not in st.session_state:
+        st.session_state['ctg_copy_markets'] = market_values
+
+    def _expand_all_ctg_copy_markets():
+        selected = st.session_state.get('ctg_copy_markets', [])
+        if 'All' in selected:
+            st.session_state['ctg_copy_markets'] = [m for m in market_options if m != 'All']
+
+    model_values = sorted(ctg_df['model'].dropna().unique().tolist())
+    model_options = ['All'] + model_values
+    if 'ctg_copy_models' not in st.session_state:
+        st.session_state['ctg_copy_models'] = model_values
+
+    def _expand_all_ctg_copy_models():
+        selected = st.session_state.get('ctg_copy_models', [])
+        if 'All' in selected:
+            st.session_state['ctg_copy_models'] = [m for m in model_options if m != 'All']
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        model_options = ['All'] + sorted(ctg_df['model'].dropna().unique())
-        selected_model = st.selectbox('Model', model_options, index=0)
+        selected_models_ui = st.multiselect(
+            'Model',
+            model_options,
+            key='ctg_copy_models',
+            on_change=_expand_all_ctg_copy_models,
+        )
     with c2:
         channel_choice = st.selectbox('Channel', ['Paid Search', 'Paid Social', 'Both'])
     with c3:
         x_start = st.slider('Pre CTG start week (x)', min_value=1, max_value=22, value=1, step=1)
     with c4:
-        kpi_choice = st.selectbox('KPI', ['icc_dcfs', 'model_dcfs', 'finder_dcfs', 'dcfs'])
+        kpi_choice = st.selectbox('KPI', ['dcfs'])
+    with c5:
+        selected_markets_ui = st.multiselect(
+            'Markets',
+            market_options,
+            key='ctg_copy_markets',
+            on_change=_expand_all_ctg_copy_markets,
+        )
+
+    selected_markets = [m for m in selected_markets_ui if m != 'All']
+    if not selected_markets:
+        st.info('Choose at least one market.')
+        st.stop()
+    selected_models = [m for m in selected_models_ui if m != 'All']
+    if not selected_models:
+        st.info('Choose at least one model.')
+        st.stop()
 
     plot_df = ctg_df.copy()
-    allowed_models = {'macan', 'taycan', 'panamera', 'cayenne'}
-    if selected_model == 'All':
-        plot_df = plot_df[plot_df['model'].astype(str).str.lower().isin(allowed_models)]
-    elif selected_model:
-        plot_df = plot_df[plot_df['model'] == selected_model]
+    selected_models_norm = {str(m).strip().lower() for m in selected_models}
+    plot_df = plot_df[plot_df['model'].astype(str).str.strip().str.lower().isin(selected_models_norm)]
 
     channel_map = {
         'Paid Search': 'Paid Search',
@@ -4960,22 +5276,14 @@ if page == 'CTG Pre/Post KPI per Session (Copy)':
         st.info('No data for the selected filters.')
         st.stop()
 
-    market_map = {
-        'CANADA': 'PCL',
-        'UK': 'PCGB',
-        'GERMANY': 'PD',
-        'FRANCE': 'POF',
-        'ITALY': 'PIT',
-    }
-    plot_df['market'] = plot_df['market'].astype(str)
-    plot_df['market'] = plot_df['market'].apply(
-        lambda m: market_map.get(m.strip().upper(), m)
-    )
+    plot_df = plot_df[plot_df['market'].isin(selected_markets)]
 
     def _period(df_in, start_week, end_week):
         return df_in[(df_in['week_num'] >= start_week) & (df_in['week_num'] <= end_week)]
 
     pre_spend = _period(plot_df, x_start, 23)
+    # Use only valid rows where both spend and selected KPI are available.
+    pre_spend = pre_spend[pre_spend['spend'].notna() & pre_spend[kpi_choice].notna()]
     post_spend = _period(plot_df, 24, 52)
 
     def _ratio(spend_df):
@@ -4993,62 +5301,58 @@ if page == 'CTG Pre/Post KPI per Session (Copy)':
     pre_ratio = _ratio(pre_spend).rename(columns={'cost_per_dcfs': 'pre_ctg'})
     pre_ratio = pre_ratio[pre_ratio['pre_ctg'].notna()]
 
-    # Post totals from overview data (all weeks)
-    overview_df = df.copy()
-    if 'Model' in overview_df.columns:
-        overview_df['Model_norm'] = overview_df['Model'].astype(str).str.strip().str.lower()
-        if selected_model == 'All':
-            overview_df = overview_df[overview_df['Model_norm'].isin(allowed_models)]
-        elif selected_model:
-            overview_df = overview_df[overview_df['Model_norm'] == str(selected_model).strip().lower()]
-    if channel_choice != 'Both' and 'Channel' in overview_df.columns:
+    # Post source: matched campaign-date CSV (same schema treatment as pre)
+    overview_df = pd.read_csv(post_data_path)
+    post_required_cols = {'market', 'model', 'week', 'spend', 'conv'}
+    if not post_required_cols.issubset(set(overview_df.columns)):
+        st.warning('Post CSV missing required columns: market, model, week, spend, conv')
+        st.stop()
+    if 'channel' not in overview_df.columns:
+        overview_df['channel'] = 'Paid Search'
+    overview_df['dcfs'] = overview_df['conv']
+    for col in ['spend', 'dcfs']:
+        overview_df[col] = pd.to_numeric(overview_df[col], errors='coerce')
+    overview_df['Model_norm'] = overview_df['model'].astype(str).str.strip().str.lower()
+    overview_df['Market'] = overview_df['market'].astype(str).apply(
+        lambda m: market_map.get(m.strip().upper(), m)
+    )
+    overview_df['Channel'] = overview_df['channel'].astype(str)
+    overview_df = overview_df[overview_df['Model_norm'].isin(selected_models_norm)]
+    if channel_choice != 'Both':
         overview_df = overview_df[overview_df['Channel'].astype(str).str.strip() == channel_choice]
-    if channel_choice == 'Both' and 'Channel' in overview_df.columns:
+    else:
         overview_df = overview_df[overview_df['Channel'].astype(str).str.strip().isin(['Paid Search', 'Paid Social'])]
-    if 'Market' in overview_df.columns:
-        overview_df['Market'] = overview_df['Market'].astype(str)
-        overview_df['Market'] = overview_df['Market'].apply(
-            lambda m: market_map.get(m.strip().upper(), m)
-        )
+    overview_df = overview_df[overview_df['Market'].isin(selected_markets)]
 
+    spend_col = 'spend'
+    kpi_col = 'dcfs'
     post_ratio = pd.DataFrame(columns=['market', 'post_ctg'])
-    if not overview_df.empty:
-        spend_col = 'Media Spend' if 'Media Spend' in overview_df.columns else 'Spend'
-        kpi_map = {
-            'icc_dcfs': 'ICC DCFS',
-            'finder_dcfs': 'Finder DCFS',
-            'model_dcfs': 'Model Detail page DCFS',
-            'dcfs': 'DCFS',
-        }
-        kpi_col = kpi_map.get(kpi_choice, 'ICC DCFS')
-        if spend_col in overview_df.columns and kpi_col in overview_df.columns:
-            overview_df[spend_col] = pd.to_numeric(overview_df[spend_col], errors='coerce')
-            overview_df[kpi_col] = pd.to_numeric(overview_df[kpi_col], errors='coerce')
-            by_market = (
-                overview_df.groupby('Market', dropna=False)
-                .agg(
-                    spend_sum=(spend_col, lambda s: s.sum(min_count=1)),
-                    dcfs_sum=(kpi_col, lambda s: s.sum(min_count=1)),
-                )
-                .reset_index()
+    if not overview_df.empty and spend_col in overview_df.columns and kpi_col in overview_df.columns:
+        overview_df = overview_df[overview_df[spend_col].notna() & overview_df[kpi_col].notna()]
+        by_market = (
+            overview_df.groupby('Market', dropna=False)
+            .agg(
+                spend_sum=(spend_col, lambda s: s.sum(min_count=1)),
+                dcfs_sum=(kpi_col, lambda s: s.sum(min_count=1)),
             )
-            by_market['post_ctg'] = by_market.apply(
-                lambda r: (r['spend_sum'] / r['dcfs_sum']) if r['dcfs_sum'] and r['dcfs_sum'] > 0 else None,
-                axis=1,
-            )
-            post_ratio = by_market.rename(columns={'Market': 'market'})[['market', 'post_ctg']]
-            post_ratio = post_ratio[post_ratio['post_ctg'].notna()]
-            # Add GLOBAL as aggregate across all markets
-            total_spend = by_market['spend_sum'].sum(min_count=1)
-            total_dcfs = by_market['dcfs_sum'].sum(min_count=1)
-            global_post = (total_spend / total_dcfs) if total_dcfs else None
-            post_ratio = pd.concat(
-                [
-                    post_ratio[post_ratio['market'] != 'GLOBAL'],
-                    pd.DataFrame([{'market': 'GLOBAL', 'post_ctg': global_post}]),
-                ],
-                ignore_index=True,
-            )
+            .reset_index()
+        )
+        by_market['post_ctg'] = by_market.apply(
+            lambda r: (r['spend_sum'] / r['dcfs_sum']) if r['dcfs_sum'] and r['dcfs_sum'] > 0 else None,
+            axis=1,
+        )
+        post_ratio = by_market.rename(columns={'Market': 'market'})[['market', 'post_ctg']]
+        post_ratio = post_ratio[post_ratio['post_ctg'].notna()]
+        total_spend = by_market['spend_sum'].sum(min_count=1)
+        total_dcfs = by_market['dcfs_sum'].sum(min_count=1)
+        global_post = (total_spend / total_dcfs) if total_dcfs else None
+        post_ratio = pd.concat(
+            [
+                post_ratio[post_ratio['market'] != 'GLOBAL'],
+                pd.DataFrame([{'market': 'GLOBAL', 'post_ctg': global_post}]),
+            ],
+            ignore_index=True,
+        )
 
     pre_markets = set(pre_ratio['market'].dropna().unique())
     post_markets = set(post_ratio['market'].dropna().unique()) if not post_ratio.empty else set()
@@ -5124,7 +5428,7 @@ if page == 'CTG Pre/Post KPI per Session (Copy)':
         summary_rows.append({
             'metric': metric,
             'pre (week x-23)': pre_val,
-            'post (all weeks)': post_val,
+            'post (weekly avg over all weeks)': post_val,
             'delta (post-pre)': delta,
             'delta %': pct,
         })
@@ -5144,7 +5448,7 @@ if page == 'CTG Pre/Post KPI per Session (Copy)':
     # Pre market metrics (ctg_pre): avg weekly spend + CPL from sums
     pre_weekly = (
         pre_spend.groupby(['market', 'week_num'], dropna=False)
-        .agg(spend=('spend', 'sum'), dcfs=('icc_dcfs', 'sum'))
+        .agg(spend=('spend', 'sum'), dcfs=(kpi_choice, 'sum'))
         .reset_index()
     )
     pre_mkt = (
@@ -5282,7 +5586,7 @@ if page == 'CTG Pre/Post KPI per Session (Copy)':
         lambda r: (r['post_dcfs_sum'] / r['post_weeks']) if r.get('post_weeks') else None,
         axis=1,
     )
-    model_label = selected_model if selected_model else 'All'
+    model_label = ', '.join(selected_models) if selected_models else 'All'
     market_table = (
         pre_totals.merge(post_totals, on='market', how='inner')
         .assign(model=model_label)
@@ -5360,6 +5664,69 @@ if page == 'CTG Pre/Post KPI per Session (Copy)':
     model_table = model_table[model_table['cpl_pre'].notna() & model_table['cpl_post'].notna()]
     st.dataframe(model_table, use_container_width=True)
 
+    st.subheader('Carline breakdown (aggregated across all markets)')
+    pre_totals_carline = (
+        pre_spend.groupby('model', dropna=False)
+        .agg(
+            pre_spend_sum=('spend', 'sum'),
+            pre_dcfs_sum=(kpi_choice, 'sum'),
+            pre_weeks=('week_num', 'nunique'),
+        )
+        .reset_index()
+    )
+    pre_totals_carline['cpl_pre'] = pre_totals_carline.apply(
+        lambda r: (r['pre_spend_sum'] / r['pre_dcfs_sum']) if r['pre_dcfs_sum'] and r['pre_dcfs_sum'] > 0 else None,
+        axis=1,
+    )
+    pre_totals_carline['spend_pre'] = pre_totals_carline['pre_spend_sum']
+    pre_totals_carline['dcfs_pre'] = pre_totals_carline['pre_dcfs_sum']
+
+    if not overview_df.empty and spend_col in overview_df.columns and kpi_col in overview_df.columns:
+        week_col = 'calendar_week' if 'calendar_week' in overview_df.columns else ('week' if 'week' in overview_df.columns else None)
+        agg_spec = {
+            'post_spend_sum': (spend_col, lambda s: s.sum(min_count=1)),
+            'post_dcfs_sum': (kpi_col, lambda s: s.sum(min_count=1)),
+        }
+        if week_col:
+            agg_spec['post_weeks'] = (week_col, 'nunique')
+        post_totals_carline = (
+            overview_df.groupby('Model_norm', dropna=False)
+            .agg(**agg_spec)
+            .reset_index()
+            .rename(columns={'Model_norm': 'model'})
+        )
+    else:
+        post_totals_carline = pd.DataFrame(columns=['model', 'post_spend_sum', 'post_dcfs_sum', 'post_weeks'])
+
+    post_totals_carline['cpl_post'] = post_totals_carline.apply(
+        lambda r: (r['post_spend_sum'] / r['post_dcfs_sum']) if r['post_dcfs_sum'] and r['post_dcfs_sum'] > 0 else None,
+        axis=1,
+    )
+    post_totals_carline['spend_post'] = post_totals_carline['post_spend_sum']
+    post_totals_carline['dcfs_post'] = post_totals_carline['post_dcfs_sum']
+
+    carline_table = (
+        pre_totals_carline.merge(post_totals_carline, on='model', how='inner')
+        [['model', 'dcfs_pre', 'dcfs_post', 'spend_pre', 'spend_post', 'cpl_pre', 'cpl_post']]
+    )
+    carline_table = carline_table[carline_table['cpl_pre'].notna() & carline_table['cpl_post'].notna()]
+    if not carline_table.empty:
+        total_dcfs_pre = carline_table['dcfs_pre'].sum(min_count=1)
+        total_dcfs_post = carline_table['dcfs_post'].sum(min_count=1)
+        total_spend_pre = carline_table['spend_pre'].sum(min_count=1)
+        total_spend_post = carline_table['spend_post'].sum(min_count=1)
+        total_row = {
+            'model': 'TOTAL',
+            'dcfs_pre': total_dcfs_pre,
+            'dcfs_post': total_dcfs_post,
+            'spend_pre': total_spend_pre,
+            'spend_post': total_spend_post,
+            'cpl_pre': (total_spend_pre / total_dcfs_pre) if total_dcfs_pre else None,
+            'cpl_post': (total_spend_post / total_dcfs_post) if total_dcfs_post else None,
+        }
+        carline_table = pd.concat([carline_table, pd.DataFrame([total_row])], ignore_index=True)
+    st.dataframe(carline_table, use_container_width=True)
+
     st.subheader('Model breakdown chart (all markets)')
     model_delta = model_table.copy()
     model_delta['delta_pct'] = model_delta.apply(
@@ -5371,7 +5738,7 @@ if page == 'CTG Pre/Post KPI per Session (Copy)':
         model_delta.pivot(index='model', columns='market', values='delta_pct')
         .sort_index()
     )
-    heat_text = heat_df.applymap(lambda v: f"{v*100:.1f}%" if pd.notna(v) else "")
+    heat_text = heat_df.apply(lambda col: col.map(lambda v: f"{v*100:.1f}%" if pd.notna(v) else ""))
     fig_models = px.imshow(
         heat_df,
         color_continuous_scale=['#1a9850', '#f7f7f7', '#b2182b'],
@@ -5391,18 +5758,19 @@ if page == 'CTG Pre/Post KPI per Session (Copy)':
 
     if st.button('Generate CTG narrative (copy)', key='ctg_pre_copy_narrative'):
         report = CTG_PRE_POST_TEMPLATE_COPY
-        report = report.replace('[MODEL]', selected_model if selected_model else 'All')
+        report = report.replace('[MARKETS]', ', '.join(selected_markets))
+        report = report.replace('[MODEL]', model_label)
         report = report.replace('[CHANNEL]', channel_choice)
         report = report.replace('[X_START]', str(x_start))
         table_lines = []
         for _, row in summary_df.iterrows():
             table_lines.append(
                 f"{row['metric']}: pre={row['pre (week x-23)']}, "
-                f"post={row['post (all weeks)']}, "
+                f"post={row['post (weekly avg over all weeks)']}, "
                 f"delta={row['delta (post-pre)']}, "
                 f"delta%={row['delta %']}"
             )
-        report = report.replace('[SUMMARY_TABLE]', '\\n'.join(table_lines) if table_lines else 'n/a')
+        report = report.replace('[SUMMARY_TABLE]', '\n'.join(table_lines) if table_lines else 'n/a')
         mkt_lines = []
         for _, row in mkt.iterrows():
             mkt_lines.append(
@@ -5414,7 +5782,7 @@ if page == 'CTG Pre/Post KPI per Session (Copy)':
                 f"pre_cpl={row.get('pre_cpl')}, post_cpl={row.get('post_cpl')}, "
                 f"delta_cpl={row.get('delta_cpl')}, delta_cpl%={row.get('delta_cpl_%')}"
             )
-        report = report.replace('[MARKET_BREAKDOWN]', '\\n'.join(mkt_lines) if mkt_lines else 'n/a')
+        report = report.replace('[MARKET_BREAKDOWN]', '\n'.join(mkt_lines) if mkt_lines else 'n/a')
         model_lines = []
         for _, row in model_table.iterrows():
             model_lines.append(
@@ -5423,7 +5791,7 @@ if page == 'CTG Pre/Post KPI per Session (Copy)':
                 f"pre_dcfs={row['dcfs_pre']}, post_dcfs={row['dcfs_post']}, "
                 f"pre_cpl={row['cpl_pre']}, post_cpl={row['cpl_post']}"
             )
-        report = report.replace('[MODEL_BREAKDOWN]', '\\n'.join(model_lines) if model_lines else 'n/a')
+        report = report.replace('[MODEL_BREAKDOWN]', '\n'.join(model_lines) if model_lines else 'n/a')
 
         context_lines = []
         pre_weeks = pre_spend['week_num'].nunique() if 'week_num' in pre_spend.columns else None
@@ -5437,6 +5805,14 @@ if page == 'CTG Pre/Post KPI per Session (Copy)':
         post_total_dcfs = overview_df[kpi_col].sum(min_count=1) if kpi_col in overview_df.columns else None
         context_lines.append(f"Pre totals: spend={pre_total_spend}, conversions={pre_total_dcfs}")
         context_lines.append(f"Post totals: spend={post_total_spend}, conversions={post_total_dcfs}")
+        if 'campaign_name' in pre_spend.columns:
+            context_lines.append(f"Pre unique campaigns used (after filters): {pre_spend['campaign_name'].dropna().nunique()}")
+        else:
+            context_lines.append("Pre unique campaigns used (after filters): n/a")
+        if 'campaign_name' in overview_df.columns:
+            context_lines.append(f"Post unique campaigns used (after filters): {overview_df['campaign_name'].dropna().nunique()}")
+        else:
+            context_lines.append("Post unique campaigns used (after filters): n/a")
         pre_model_totals = (
             pre_spend.groupby('model', dropna=False)[kpi_choice]
             .sum(min_count=1)
@@ -5454,7 +5830,7 @@ if page == 'CTG Pre/Post KPI per Session (Copy)':
         context_lines.append("Post conversions by model:")
         for _, row in post_model_totals.iterrows():
             context_lines.append(f"  - {row['model']}: {row[kpi_col]}")
-        report = report + "\\n\\nData Context\\n" + "\\n".join(context_lines)
+        report = report + "\n\nData Context\n" + "\n".join(context_lines)
         st.text_area('CTG narrative (copy)', report, height=520)
     st.stop()
 
@@ -5587,13 +5963,30 @@ if page == 'Overview':
         fig.update_yaxes(title_text=right_kpi, secondary_y=True)
     st.plotly_chart(fig, use_container_width=True)
 
-    total_left = weekly['left_kpi'].sum(skipna=True)
+    def _total_kpi_value(label, series_name):
+        # For cost-style KPIs, compute total as ratio of totals from filtered base data.
+        if label == 'Cost per Lead (Forms Submission Started)':
+            spend_total = pd.to_numeric(dual_base.get('Media Spend'), errors='coerce').sum(min_count=1)
+            denom_total = pd.to_numeric(dual_base.get('Forms Submission Started'), errors='coerce').sum(min_count=1)
+            return _safe_ratio(spend_total, denom_total)
+        if label == 'Cost per Lead (DCFS)':
+            spend_total = pd.to_numeric(dual_base.get('Media Spend'), errors='coerce').sum(min_count=1)
+            denom_total = pd.to_numeric(dual_base.get('DCFS'), errors='coerce').sum(min_count=1)
+            return _safe_ratio(spend_total, denom_total)
+        if label == 'CPM':
+            spend_total = pd.to_numeric(dual_base.get('Media Spend'), errors='coerce').sum(min_count=1)
+            impressions_total = pd.to_numeric(dual_base.get('Impressions'), errors='coerce').sum(min_count=1)
+            ratio = _safe_ratio(spend_total, impressions_total)
+            return (ratio * 1000.0) if ratio is not None else None
+        return pd.to_numeric(weekly[series_name], errors='coerce').sum(skipna=True)
+
+    total_left = _total_kpi_value(left_kpi, 'left_kpi')
     if right_kpi and 'right_kpi' in weekly.columns:
-        total_right = weekly['right_kpi'].sum(skipna=True)
+        total_right = _total_kpi_value(right_kpi, 'right_kpi')
         c1, c2 = st.columns(2)
         with c1:
-            st.metric(f'Total {left_kpi}', f'{total_left:,.2f}')
+            st.metric(f'Total {left_kpi}', f'{total_left:,.2f}' if total_left is not None else 'n/a')
         with c2:
-            st.metric(f'Total {right_kpi}', f'{total_right:,.2f}')
+            st.metric(f'Total {right_kpi}', f'{total_right:,.2f}' if total_right is not None else 'n/a')
     else:
-        st.metric(f'Total {left_kpi}', f'{total_left:,.2f}')
+        st.metric(f'Total {left_kpi}', f'{total_left:,.2f}' if total_left is not None else 'n/a')

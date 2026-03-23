@@ -1,0 +1,38 @@
+Market Code,Market Name,Status,Scope Gaps,Observations,Issues Identified,Context,Next Steps
+PCNA,North America,The new UTM framework is partially implemented.,"- The new UTM structure is not applied to:
+- DV360 – Porsche Design 2026
+- Direct – Motor Sports 2026 (New Car activity is managed separately.)","- UTM usage is inconsistent across other concepts, indicating the rollout is incomplete. There are discrepancies between OneReporting and GA4, suggesting some live campaigns may be running in accounts we do not currently have visibility on.",,,"- Confirm that all live search and media placements are using the new UTM structure.
+- Validate access to all active accounts to ensure consistent reporting across platforms."
+PIB,Portugal,Meta campaigns are fully aligned with the new UTM structure.,,,"- Always-on search activity is not consistently visible in GA4.
+- DV360 activity is not visible in either GA4 or OneReporting.",,"- Verify DV360 account and campaign IDs for Portugal.
+- Align account mappings across GA4 and OneReporting."
+PCGB,Great Britain,Limited visibility and inconsistent taxonomy usage.,,,"- Only a small number of 2026 tacticals are listed in Planit, despite multiple campaigns being live.
+- Some campaigns are not using the new UTM structure (e.g. Amazon activity).
+- There is a clear misalignment between Planit and live execution.",,"- Clarify why Planit does not reflect the full scope of live activity.
+- Confirm which campaigns are live and ensure they are aligned with the approved UTM framework."
+PCH,Switzerland,Search Always-On 2026 campaigns are live.,,,"- Multiple placements are confirmed live in OneReporting but do not resolve into GA4, despite delivery.",,- Investigate why UTMs are not being recognised by GA4 and confirm tagging consistency.
+PNO,Norway,No fully compliant channels identified.,,,"- Search and Social are visible in OneReporting but are not using the new UTM structure.
+- No identifiable activity in GA4 using the new framework.",,- Update all channels to the new UTM standards and validate ingestion into GA4.
+POF,France,Very limited adoption of the new UTM framework.,,,"- Only one campaign is compliant with the new structure.
+- Search and Social activity has not yet been updated.
+- Planit shows duplication and inconsistencies in placement setup.",,"- Align Search and Social activity to the new UTM structure.
+- Resolve Planit configuration issues to support accurate reporting."
+PPL,Poland,New UTM framework not fully implemented.,,,"- Search, YouTube, and Demand Gen campaigns are missing required placement IDs.
+- Social campaigns are live without new UTMs.
+- Placement IDs are not visible in GA4.",,"- Rebuild UTMs across all active channels using Planit-aligned placement IDs.
+- Validate GA4 visibility post-update."
+PAP,,Partial UTM Implementation.,,,"- Majority of Social placements are correctly tagged, but some are still outstanding.
+- Teads activity appears in GA4 but not in OneReporting, indicating a reporting mismatch.",,"- Finalise UTM updates for remaining placements.
+- Align OneReporting and GA4 ingestion for Teads activity."
+PCA,Australia,Mostly compliant.,,,"- One 2026 campaign remains outstanding.
+- Only DV360 Audio activity is currently visible in GA4.",,- Validate Programmatic setup against Planit to ensure full coverage.
+PKO,South Korea,Validation currently not possible.,,,,"- Campaigns can be built in Planit, but data is not ingested downstream.",- Confirm ingestion feasibility before assessing UTM compliance.
+PLA,,No GA4 visibility.,,,"- YouTube, DV360, and Direct activity are not appearing in GA4.",,- Investigate tagging and account connections for the affected campaign.
+PME,MENA,No tacticals currently planned.,,,,,- Confirm whether any UTM activity is expected or required at this stage.
+PSG,,Limited compliance.,,,"- UTMs visible only for selected Facebook campaigns.
+- No compliant Search or Direct activity found.",,- Confirm which campaigns should be live and ensure full UTM alignment.
+PTW,Taiwan,Partial UTM Implementation.,,,"- Some Meta activity correctly tagged.
+- Yahoo activity not visible.",,- Confirm all live placements and ensure consistent use of the new UTM structure.
+PCEE,,Partial UTM Implementation.,,,"- DV360 activity is correctly tagged and visible, but coverage is incomplete.",,- Confirm with the market that all live campaigns are using the new UTMs.
+PCL,Canada,No Planit usage identified.,,,"- Without Planit, the UTM builder is not being used.
+- Search activity is live but UTMs are unclear.",,- Understand why activity is not planned in Planit and validate current UTM usage.
