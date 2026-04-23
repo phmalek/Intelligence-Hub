@@ -1,8 +1,12 @@
 from io import BytesIO
 from pathlib import Path
 import os
+import json
 import re
+import shutil
+import sqlite3
 import subprocess
+import sys
 from datetime import datetime
 from typing import Optional
 
@@ -19,7 +23,15 @@ try:
 except Exception:
     OpenAI = None
 
+try:
+    import pythoncom
+    import win32com.client
+except Exception:
+    pythoncom = None
+    win32com = None
+
 from opportunity import OPPORTUNITY_CONFIG, compute_headroom_scores
+from taxonomy_analysis import build_taxonomy_analysis, load_taxonomy_data
 
 try:
     import numpy as np
@@ -35,10 +47,213 @@ LOGO_PATH = BASE_DIR / 'porsche_logo.png'
 UTM_NOTES_PDF_PATH = BASE_DIR / 'UTM_data' / 'Porsche_UTM Adoption Notes_Feb2026.pdf'
 UTM_NOTES_CSV_PATH = BASE_DIR / 'UTM_data' / 'Porsche_UTM Adoption Notes_Feb2026.csv'
 ADDRESSBOOK_CSV_PATH = BASE_DIR / 'UTM_data' / 'PHD_Local_Market_Addressbook.csv'
+UTM_OUTREACH_DB_PATH = BASE_DIR / 'UTM_data' / 'outreach_tracking.db'
+TAXONOMY_HYGIENE_PATH = BASE_DIR / 'taxonomy_hygine' / 'Copy of VWG Taxonomy Output v1.3 8 Apr 2026 11 30 07.xlsx'
+MANUAL_UTM_TEST_RECORDS = [
+    {
+        'market_code': 'test_market',
+        'market_name': 'test_market',
+        'status': 'Test market for Outlook workflow',
+        'context': 'Manual test market added for local Outlook testing.',
+        'next_steps': 'Send test outreach email to validate pywin32 integration.',
+        'section': 'PlanIt Champion',
+        'name': 'Ali Test',
+        'email': 'ph.malek@gmail.com',
+        'notes': 'Manual test contact added for Outlook workflow testing.',
+    },
+]
+OPTIONAL_UTM_CC_CONTACTS = [
+    {'label': 'Porsche Client', 'email': 'laura.esguerra1@porsche.de'},
+    {'label': 'PHD internal: Adriana Conte', 'email': 'adriana.conte@omc.com'},
+    {'label': 'PHD internal: Katharina Kleinke', 'email': 'katharina.kleinke@omc.com'},
+    {'label': 'DTO: Chloe Wright', 'email': 'chloe.wright@omc.com'},
+]
+CONTACT_TAG_OPTIONS = ['account_lead', 'planit_champion']
+UTM_ENGAGEMENT_STAGES = [
+    'To Contact',
+    'Sent',
+    'Waiting for Reply',
+    'In Progress',
+    'Blocked',
+    'Resolved',
+    'Closed',
+]
+UTM_ENGAGEMENT_PRIORITIES = ['High', 'Medium', 'Low']
+UTM_THREAD_SUBJECT_KEYWORD = 'UTM adoption follow-up'
+# Emails to exclude when determining whether a market has replied (internal team / fixed CC contacts)
+UTM_THREAD_EXCLUDED_REPLY_EMAILS = {c['email'].lower() for c in OPTIONAL_UTM_CC_CONTACTS}
 
 st.set_page_config(page_title='Intelligence Console', layout='wide')
 
 load_dotenv()
+
+
+@st.cache_data(show_spinner=False)
+def load_taxonomy_hygiene_workbook(path_str: str) -> pd.DataFrame:
+    return load_taxonomy_data(Path(path_str))
+
+
+@st.cache_data(show_spinner=False)
+def run_taxonomy_hygiene_analysis(path_str: str) -> dict:
+    df_tax = load_taxonomy_hygiene_workbook(path_str)
+    return build_taxonomy_analysis(df_tax)
+
+
+def format_meur(value: float) -> str:
+    return f"EUR {value / 1_000_000:.1f}m"
+
+
+def build_budget_sankey_figure(
+    total_budget: float,
+    base_highlight_share: float,
+    offline_upweight: float,
+    nonwebsite_upweight: float,
+    click_credit_shift: float,
+    highlight_upper_share: float,
+    always_on_upper_share: float,
+    upper_to_awareness_share: float,
+    upper_to_consideration_share: float,
+    lower_to_conversion_share: float,
+):
+    total_budget = float(total_budget)
+    base_highlight_share = float(base_highlight_share)
+    base_always_on_share = max(0.0, 1.0 - base_highlight_share)
+
+    highlight_weight = base_highlight_share * (1.0 + offline_upweight + nonwebsite_upweight + click_credit_shift)
+    always_on_weight = base_always_on_share
+    recommended_highlight_share = highlight_weight / (highlight_weight + always_on_weight) if (highlight_weight + always_on_weight) > 0 else 0.0
+    recommended_always_on_share = 1.0 - recommended_highlight_share
+
+    highlight_budget = total_budget * recommended_highlight_share
+    always_on_budget = total_budget * recommended_always_on_share
+
+    upper_highlight_budget = highlight_budget * highlight_upper_share
+    lower_highlight_budget = highlight_budget - upper_highlight_budget
+    upper_always_on_budget = always_on_budget * always_on_upper_share
+    lower_always_on_budget = always_on_budget - upper_always_on_budget
+
+    upper_total_budget = upper_highlight_budget + upper_always_on_budget
+    lower_total_budget = lower_highlight_budget + lower_always_on_budget
+
+    awareness_budget = upper_total_budget * upper_to_awareness_share
+    consideration_from_upper = upper_total_budget * upper_to_consideration_share
+    consideration_from_lower = lower_total_budget * (1.0 - lower_to_conversion_share)
+    conversion_budget = lower_total_budget * lower_to_conversion_share
+    consideration_budget = consideration_from_upper + consideration_from_lower
+
+    fig = go.Figure(
+        go.Sankey(
+            arrangement='fixed',
+            node=dict(
+                pad=28,
+                thickness=22,
+                line=dict(color='rgba(20,20,20,0.35)', width=1.0),
+                label=[
+                    f"Total Budget<br>{format_meur(total_budget)}",
+                    f"Always On / Core<br>{format_meur(always_on_budget)}",
+                    f"Highlight Activations<br>{format_meur(highlight_budget)}",
+                    f"AO Upper / Demand Support<br>{format_meur(upper_always_on_budget)}",
+                    f"AO Lower / Harvesting<br>{format_meur(lower_always_on_budget)}",
+                    f"Highlight Upper / Launch Demand<br>{format_meur(upper_highlight_budget)}",
+                    f"Highlight Lower / Launch Harvesting<br>{format_meur(lower_highlight_budget)}",
+                    f"Awareness<br>{format_meur(awareness_budget)}",
+                    f"Consideration<br>{format_meur(consideration_budget)}",
+                    f"Conversion / Harvesting<br>{format_meur(conversion_budget)}",
+                ],
+                color=[
+                    '#111111',
+                    '#22313F',
+                    '#F40437',
+                    '#8E7C6E',
+                    '#375D81',
+                    '#D5A021',
+                    '#5392C5',
+                    '#D96C6C',
+                    '#E2B84B',
+                    '#5C8B5A',
+                ],
+                x=[0.02, 0.23, 0.23, 0.50, 0.50, 0.50, 0.50, 0.82, 0.82, 0.82],
+                y=[0.46, 0.20, 0.70, 0.10, 0.34, 0.58, 0.82, 0.12, 0.45, 0.80],
+                hovertemplate='%{label}<extra></extra>',
+            ),
+            link=dict(
+                source=[
+                    0, 0,      # total -> AO / Highlight
+                    1, 1,      # AO -> upper/lower
+                    2, 2,      # Highlight -> upper/lower
+                    3, 3,      # AO upper -> awareness / consideration
+                    4, 4,      # AO lower -> consideration / conversion
+                    5, 5,      # Highlight upper -> awareness / consideration
+                    6, 6,      # Highlight lower -> consideration / conversion
+                ],
+                target=[
+                    1, 2,
+                    3, 4,
+                    5, 6,
+                    7, 8,
+                    8, 9,
+                    7, 8,
+                    8, 9,
+                ],
+                value=[
+                    always_on_budget,
+                    highlight_budget,
+                    upper_always_on_budget,
+                    lower_always_on_budget,
+                    upper_highlight_budget,
+                    lower_highlight_budget,
+                    awareness_budget * (upper_always_on_budget / upper_total_budget) if upper_total_budget > 0 else 0.0,
+                    consideration_from_upper * (upper_always_on_budget / upper_total_budget) if upper_total_budget > 0 else 0.0,
+                    consideration_from_lower * (lower_always_on_budget / lower_total_budget) if lower_total_budget > 0 else 0.0,
+                    conversion_budget * (lower_always_on_budget / lower_total_budget) if lower_total_budget > 0 else 0.0,
+                    awareness_budget * (upper_highlight_budget / upper_total_budget) if upper_total_budget > 0 else 0.0,
+                    consideration_from_upper * (upper_highlight_budget / upper_total_budget) if upper_total_budget > 0 else 0.0,
+                    consideration_from_lower * (lower_highlight_budget / lower_total_budget) if lower_total_budget > 0 else 0.0,
+                    conversion_budget * (lower_highlight_budget / lower_total_budget) if lower_total_budget > 0 else 0.0,
+                ],
+                color=[
+                    'rgba(34,49,63,0.55)',
+                    'rgba(244,4,55,0.46)',
+                    'rgba(142,124,110,0.55)',
+                    'rgba(55,93,129,0.52)',
+                    'rgba(213,160,33,0.56)',
+                    'rgba(83,146,197,0.54)',
+                    'rgba(142,124,110,0.42)',
+                    'rgba(142,124,110,0.30)',
+                    'rgba(55,93,129,0.34)',
+                    'rgba(55,93,129,0.26)',
+                    'rgba(213,160,33,0.42)',
+                    'rgba(213,160,33,0.32)',
+                    'rgba(83,146,197,0.36)',
+                    'rgba(83,146,197,0.28)',
+                ],
+                hovertemplate='Flow: %{value:$,.0f}<extra></extra>',
+            ),
+        )
+    )
+    fig.update_layout(
+        font=dict(size=15, color='#111111', family='Arial Black'),
+        paper_bgcolor='#F6F1EA',
+        plot_bgcolor='#F6F1EA',
+        margin=dict(l=20, r=20, t=20, b=20),
+        height=680,
+    )
+
+    metrics = {
+        'base_highlight_share': base_highlight_share,
+        'recommended_highlight_share': recommended_highlight_share,
+        'recommended_always_on_share': recommended_always_on_share,
+        'highlight_budget': highlight_budget,
+        'always_on_budget': always_on_budget,
+        'upper_always_on_budget': upper_always_on_budget,
+        'lower_always_on_budget': lower_always_on_budget,
+        'upper_highlight_budget': upper_highlight_budget,
+        'lower_highlight_budget': lower_highlight_budget,
+        'awareness_budget': awareness_budget,
+        'consideration_budget': consideration_budget,
+        'conversion_budget': conversion_budget,
+    }
+    return fig, metrics
 
 HEADROOM_SUMMARY_TEMPLATE = (
     "Headroom by [GROUP_BY] quantifies efficiency upside versus a benchmark CPL. "
@@ -700,9 +915,17 @@ def _utm_parse_notes_text(raw_text: str) -> pd.DataFrame:
 
 
 @st.cache_data
-def load_utm_adoption_notes(pdf_path: str, mtime: float) -> pd.DataFrame:
+def load_utm_adoption_notes(pdf_path: str, mtime: float, fallback_csv_path: Optional[str] = None) -> pd.DataFrame:
+    mutool_path = shutil.which('mutool')
+    if mutool_path is None:
+        if fallback_csv_path and Path(fallback_csv_path).exists():
+            return pd.read_csv(fallback_csv_path).fillna('')
+        raise FileNotFoundError(
+            "MuPDF 'mutool' is not installed and no fallback CSV was found for UTM adoption notes."
+        )
+
     result = subprocess.run(
-        ['mutool', 'draw', '-F', 'txt', '-o', '-', pdf_path],
+        [mutool_path, 'draw', '-F', 'txt', '-o', '-', pdf_path],
         check=True,
         capture_output=True,
         text=True,
@@ -714,7 +937,11 @@ def load_or_create_utm_adoption_notes_csv(pdf_path: Path, csv_path: Path) -> pd.
     if csv_path.exists():
         return pd.read_csv(csv_path).fillna('')
 
-    base_df = load_utm_adoption_notes(str(pdf_path), pdf_path.stat().st_mtime).fillna('')
+    base_df = load_utm_adoption_notes(
+        str(pdf_path),
+        pdf_path.stat().st_mtime,
+        fallback_csv_path=str(csv_path),
+    ).fillna('')
     base_df.to_csv(csv_path, index=False)
     return base_df
 
@@ -726,6 +953,1377 @@ def save_utm_adoption_notes_csv(df: pd.DataFrame, csv_path: Path) -> None:
 @st.cache_data
 def load_market_addressbook_csv(csv_path: str, mtime: float) -> pd.DataFrame:
     return pd.read_csv(csv_path).fillna('')
+
+
+def _get_utm_outreach_db_connection(db_path: Path) -> sqlite3.Connection:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def initialize_utm_outreach_db(db_path: Path) -> None:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS utm_adoption_notes (
+                market_code TEXT PRIMARY KEY,
+                market_name TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                scope_gaps TEXT NOT NULL DEFAULT '',
+                observations TEXT NOT NULL DEFAULT '',
+                issues_identified TEXT NOT NULL DEFAULT '',
+                context TEXT NOT NULL DEFAULT '',
+                next_steps TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS utm_adoption_notes_base (
+                market_code TEXT PRIMARY KEY,
+                market_name TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT '',
+                scope_gaps TEXT NOT NULL DEFAULT '',
+                observations TEXT NOT NULL DEFAULT '',
+                issues_identified TEXT NOT NULL DEFAULT '',
+                context TEXT NOT NULL DEFAULT '',
+                next_steps TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS contacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market TEXT NOT NULL,
+                section TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                email TEXT NOT NULL,
+                contact_tags TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                source_sheet TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_market_section_email
+            ON contacts (market, section, email);
+
+            CREATE TABLE IF NOT EXISTS email_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                workflow TEXT NOT NULL,
+                subject_template TEXT NOT NULL,
+                body_template TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_email_templates_name_workflow
+            ON email_templates (name, workflow);
+
+            CREATE TABLE IF NOT EXISTS outreach_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workflow TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT NOT NULL DEFAULT '',
+                filters_json TEXT NOT NULL DEFAULT '',
+                template_id INTEGER,
+                FOREIGN KEY (template_id) REFERENCES email_templates(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS outreach_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                market TEXT NOT NULL,
+                status_snapshot TEXT NOT NULL DEFAULT '',
+                to_emails TEXT NOT NULL DEFAULT '',
+                cc_emails TEXT NOT NULL DEFAULT '',
+                subject_rendered TEXT NOT NULL DEFAULT '',
+                body_rendered TEXT NOT NULL DEFAULT '',
+                sent_at TEXT,
+                outlook_entry_id TEXT NOT NULL DEFAULT '',
+                outlook_conversation_id TEXT NOT NULL DEFAULT '',
+                sync_state TEXT NOT NULL DEFAULT 'pending',
+                replied INTEGER NOT NULL DEFAULT 0,
+                last_reply_at TEXT,
+                last_reply_from TEXT NOT NULL DEFAULT '',
+                last_reply_snippet TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (run_id) REFERENCES outreach_runs(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_outreach_messages_run_id
+            ON outreach_messages (run_id);
+
+            CREATE INDEX IF NOT EXISTS idx_outreach_messages_market
+            ON outreach_messages (market);
+
+            CREATE TABLE IF NOT EXISTS outreach_replies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                outreach_message_id INTEGER NOT NULL,
+                received_at TEXT,
+                sender_email TEXT NOT NULL DEFAULT '',
+                subject TEXT NOT NULL DEFAULT '',
+                snippet TEXT NOT NULL DEFAULT '',
+                outlook_entry_id TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (outreach_message_id) REFERENCES outreach_messages(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_outreach_replies_message_id
+            ON outreach_replies (outreach_message_id);
+
+            CREATE TABLE IF NOT EXISTS market_engagement (
+                market_code TEXT PRIMARY KEY,
+                market_name TEXT NOT NULL DEFAULT '',
+                workflow_stage TEXT NOT NULL DEFAULT 'To Contact',
+                owner TEXT NOT NULL DEFAULT '',
+                priority TEXT NOT NULL DEFAULT 'Medium',
+                issue_summary TEXT NOT NULL DEFAULT '',
+                latest_note TEXT NOT NULL DEFAULT '',
+                next_action TEXT NOT NULL DEFAULT '',
+                next_action_due TEXT NOT NULL DEFAULT '',
+                first_contact_at TEXT NOT NULL DEFAULT '',
+                last_contact_at TEXT NOT NULL DEFAULT '',
+                resolved_at TEXT NOT NULL DEFAULT '',
+                closed_at TEXT NOT NULL DEFAULT '',
+                touchpoints_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS market_engagement_updates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_code TEXT NOT NULL,
+                event_type TEXT NOT NULL DEFAULT 'manual_update',
+                workflow_stage TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                next_action TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (market_code) REFERENCES market_engagement(market_code)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_market_engagement_updates_market_code
+            ON market_engagement_updates (market_code);
+
+            CREATE TABLE IF NOT EXISTS utm_sent_threads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT UNIQUE NOT NULL,
+                subject TEXT NOT NULL DEFAULT '',
+                first_sent_at TEXT NOT NULL DEFAULT '',
+                last_activity_at TEXT NOT NULL DEFAULT '',
+                message_count INTEGER NOT NULL DEFAULT 0,
+                participant_emails TEXT NOT NULL DEFAULT '',
+                fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS utm_sent_thread_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id INTEGER NOT NULL,
+                outlook_entry_id TEXT NOT NULL DEFAULT '',
+                direction TEXT NOT NULL DEFAULT 'received',
+                sender_email TEXT NOT NULL DEFAULT '',
+                sender_name TEXT NOT NULL DEFAULT '',
+                to_emails TEXT NOT NULL DEFAULT '',
+                cc_emails TEXT NOT NULL DEFAULT '',
+                timestamp TEXT NOT NULL DEFAULT '',
+                subject TEXT NOT NULL DEFAULT '',
+                body_text TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (thread_id) REFERENCES utm_sent_threads(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_utm_sent_thread_messages_thread_id
+            ON utm_sent_thread_messages (thread_id);
+            """
+        )
+        contact_columns = {row[1] for row in conn.execute("PRAGMA table_info('contacts')").fetchall()}
+        if 'contact_tags' not in contact_columns:
+            conn.execute("ALTER TABLE contacts ADD COLUMN contact_tags TEXT NOT NULL DEFAULT ''")
+        reply_columns = {row[1] for row in conn.execute("PRAGMA table_info('outreach_replies')").fetchall()}
+        if 'sender_name' not in reply_columns:
+            conn.execute("ALTER TABLE outreach_replies ADD COLUMN sender_name TEXT NOT NULL DEFAULT ''")
+        if 'body_text' not in reply_columns:
+            conn.execute("ALTER TABLE outreach_replies ADD COLUMN body_text TEXT NOT NULL DEFAULT ''")
+
+
+def _normalize_utm_notes_df(notes_df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {
+        'Market Code': 'market_code',
+        'Market Name': 'market_name',
+        'Status': 'status',
+        'Scope Gaps': 'scope_gaps',
+        'Observations': 'observations',
+        'Issues Identified': 'issues_identified',
+        'Context': 'context',
+        'Next Steps': 'next_steps',
+    }
+    expected_columns = list(rename_map.values())
+    normalized = notes_df.rename(columns=rename_map).copy()
+    missing_columns = [column for column in expected_columns if column not in normalized.columns]
+    if missing_columns:
+        raise ValueError(f'UTM notes data missing required columns: {", ".join(missing_columns)}')
+    normalized = normalized[expected_columns].fillna('')
+    normalized = normalized.astype(str).apply(lambda column: column.str.strip())
+    normalized = normalized[normalized['market_code'] != '']
+    return normalized
+
+
+def _normalize_contacts_df(contacts_df: pd.DataFrame) -> pd.DataFrame:
+    expected_columns = ['market', 'section', 'name', 'title', 'email', 'notes', 'source_sheet']
+    normalized = contacts_df.copy()
+    missing_columns = [column for column in expected_columns if column not in normalized.columns]
+    if missing_columns:
+        raise ValueError(f'Addressbook CSV missing required columns: {", ".join(missing_columns)}')
+    normalized = normalized[expected_columns].fillna('')
+    normalized = normalized.astype(str).apply(lambda column: column.str.strip())
+    normalized = normalized[normalized['email'] != '']
+    normalized = normalized.drop_duplicates(subset=['market', 'section', 'email'], keep='first')
+    return normalized
+
+
+def bootstrap_utm_notes_db(db_path: Path, pdf_path: Path, csv_path: Path) -> dict:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        current_count = conn.execute('SELECT COUNT(*) FROM utm_adoption_notes').fetchone()[0]
+        base_count = conn.execute('SELECT COUNT(*) FROM utm_adoption_notes_base').fetchone()[0]
+        if current_count > 0 and base_count > 0:
+            return {'bootstrapped': False, 'rows': int(current_count)}
+
+    if csv_path.exists():
+        source_df = pd.read_csv(csv_path).fillna('')
+    else:
+        source_df = load_utm_adoption_notes(
+            str(pdf_path),
+            pdf_path.stat().st_mtime,
+            fallback_csv_path=None,
+        ).fillna('')
+
+    normalized = _normalize_utm_notes_df(source_df)
+    note_records = [
+        (
+            row['market_code'],
+            row['market_name'],
+            row['status'],
+            row['scope_gaps'],
+            row['observations'],
+            row['issues_identified'],
+            row['context'],
+            row['next_steps'],
+        )
+        for _, row in normalized.iterrows()
+    ]
+
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        conn.execute('DELETE FROM utm_adoption_notes')
+        conn.execute('DELETE FROM utm_adoption_notes_base')
+        conn.executemany(
+            '''
+            INSERT INTO utm_adoption_notes (
+                market_code,
+                market_name,
+                status,
+                scope_gaps,
+                observations,
+                issues_identified,
+                context,
+                next_steps,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''',
+            note_records,
+        )
+        conn.executemany(
+            '''
+            INSERT INTO utm_adoption_notes_base (
+                market_code,
+                market_name,
+                status,
+                scope_gaps,
+                observations,
+                issues_identified,
+                context,
+                next_steps,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''',
+            note_records,
+        )
+    return {'bootstrapped': True, 'rows': len(note_records)}
+
+
+def bootstrap_utm_contacts_db(db_path: Path, csv_path: Path) -> dict:
+    expected_columns = ['market', 'section', 'name', 'title', 'email', 'notes', 'source_sheet']
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        current_count = conn.execute('SELECT COUNT(*) FROM contacts').fetchone()[0]
+        if current_count > 0:
+            return {'bootstrapped': False, 'rows': int(current_count)}
+
+    contacts_df = pd.read_csv(csv_path).fillna('')
+    normalized = _normalize_contacts_df(contacts_df)
+
+    contact_records = [
+        tuple(row[column] for column in expected_columns)
+        for _, row in normalized.iterrows()
+    ]
+
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        conn.executemany(
+            '''
+            INSERT INTO contacts (
+                market,
+                section,
+                name,
+                title,
+                email,
+                notes,
+                source_sheet,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''',
+            contact_records,
+        )
+    return {'bootstrapped': True, 'rows': len(contact_records)}
+
+
+def load_utm_notes_from_db(db_path: Path) -> pd.DataFrame:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        notes_df = pd.read_sql_query(
+            '''
+            SELECT
+                market_code AS "Market Code",
+                market_name AS "Market Name",
+                status AS "Status",
+                scope_gaps AS "Scope Gaps",
+                observations AS "Observations",
+                issues_identified AS "Issues Identified",
+                context AS "Context",
+                next_steps AS "Next Steps"
+            FROM utm_adoption_notes
+            ORDER BY market_code
+            ''',
+            conn,
+        )
+    return notes_df.fillna('')
+
+
+def save_utm_notes_to_db(df: pd.DataFrame, db_path: Path) -> None:
+    normalized = _normalize_utm_notes_df(df)
+    note_records = [
+        (
+            row['market_code'],
+            row['market_name'],
+            row['status'],
+            row['scope_gaps'],
+            row['observations'],
+            row['issues_identified'],
+            row['context'],
+            row['next_steps'],
+        )
+        for _, row in normalized.iterrows()
+    ]
+
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        conn.execute('DELETE FROM utm_adoption_notes')
+        conn.executemany(
+            '''
+            INSERT INTO utm_adoption_notes (
+                market_code,
+                market_name,
+                status,
+                scope_gaps,
+                observations,
+                issues_identified,
+                context,
+                next_steps,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''',
+            note_records,
+        )
+
+
+def reset_utm_notes_to_base(db_path: Path) -> None:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        base_rows = conn.execute(
+            '''
+            SELECT
+                market_code,
+                market_name,
+                status,
+                scope_gaps,
+                observations,
+                issues_identified,
+                context,
+                next_steps
+            FROM utm_adoption_notes_base
+            ORDER BY market_code
+            '''
+        ).fetchall()
+        conn.execute('DELETE FROM utm_adoption_notes')
+        conn.executemany(
+            '''
+            INSERT INTO utm_adoption_notes (
+                market_code,
+                market_name,
+                status,
+                scope_gaps,
+                observations,
+                issues_identified,
+                context,
+                next_steps,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''',
+            [tuple(row) for row in base_rows],
+        )
+
+
+def load_contacts_from_db(db_path: Path) -> pd.DataFrame:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        contacts_df = pd.read_sql_query(
+            '''
+            SELECT market, section, name, title, email, contact_tags, notes, source_sheet
+            FROM contacts
+            ORDER BY market, section, name, email
+            ''',
+            conn,
+        )
+    return contacts_df.fillna('')
+
+
+def annotate_addressbook_contacts(contacts_df: pd.DataFrame) -> pd.DataFrame:
+    annotated = contacts_df.copy()
+    title_series = annotated['title'].fillna('').astype(str)
+    section_series = annotated['section'].fillna('').astype(str)
+    email_series = annotated['email'].fillna('').astype(str)
+    tag_series = annotated['contact_tags'].fillna('').astype(str)
+
+    annotated['is_porsche_client'] = (
+        section_series.str.contains('PAG Client Contact', case=False, na=False)
+        | email_series.str.contains('@porsche\\.', case=False, na=False)
+    )
+    annotated['is_account_lead'] = tag_series.str.contains(r'(^|,)account_lead(,|$)', case=False, na=False)
+    annotated['contact_type'] = 'Other'
+    annotated.loc[annotated['is_porsche_client'], 'contact_type'] = 'Porsche Client'
+    annotated.loc[annotated['is_account_lead'], 'contact_type'] = 'Account Lead'
+    annotated.loc[
+        annotated['is_porsche_client'] & annotated['is_account_lead'],
+        'contact_type',
+    ] = 'Porsche Client + Account Lead'
+    return annotated
+
+
+def load_utm_outreach_db_counts(db_path: Path) -> dict:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        counts = {
+            'contacts': conn.execute('SELECT COUNT(*) FROM contacts').fetchone()[0],
+            'email_templates': conn.execute('SELECT COUNT(*) FROM email_templates').fetchone()[0],
+            'outreach_runs': conn.execute('SELECT COUNT(*) FROM outreach_runs').fetchone()[0],
+            'outreach_messages': conn.execute('SELECT COUNT(*) FROM outreach_messages').fetchone()[0],
+            'outreach_replies': conn.execute('SELECT COUNT(*) FROM outreach_replies').fetchone()[0],
+        }
+    return {key: int(value) for key, value in counts.items()}
+
+
+def ensure_manual_utm_test_records(db_path: Path) -> None:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        for record in MANUAL_UTM_TEST_RECORDS:
+            conn.execute(
+                '''
+                INSERT INTO contacts (
+                    market,
+                    section,
+                    name,
+                    title,
+                    email,
+                    notes,
+                    source_sheet,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(market, section, email) DO UPDATE SET
+                    name = excluded.name,
+                    title = excluded.title,
+                    notes = excluded.notes,
+                    source_sheet = excluded.source_sheet,
+                    updated_at = CURRENT_TIMESTAMP
+                ''',
+                (
+                    record['market_code'],
+                    record['section'],
+                    record['name'],
+                    '',
+                    record['email'],
+                    record['notes'],
+                    'manual',
+                ),
+            )
+            conn.execute(
+                '''
+                INSERT INTO utm_adoption_notes (
+                    market_code,
+                    market_name,
+                    status,
+                    scope_gaps,
+                    observations,
+                    issues_identified,
+                    context,
+                    next_steps,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(market_code) DO UPDATE SET
+                    market_name = excluded.market_name,
+                    status = excluded.status,
+                    scope_gaps = excluded.scope_gaps,
+                    observations = excluded.observations,
+                    issues_identified = excluded.issues_identified,
+                    context = excluded.context,
+                    next_steps = excluded.next_steps,
+                    updated_at = CURRENT_TIMESTAMP
+                ''',
+                (
+                    record['market_code'],
+                    record['market_name'],
+                    record['status'],
+                    '',
+                    '',
+                    '',
+                    record['context'],
+                    record['next_steps'],
+                ),
+            )
+
+
+def bootstrap_contact_tags(db_path: Path) -> None:
+    account_lead_pattern = r'account'
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        contacts = conn.execute(
+            '''
+            SELECT id, title, section
+            FROM contacts
+            '''
+        ).fetchall()
+        for contact in contacts:
+            title = str(contact['title'] or '')
+            section = str(contact['section'] or '')
+            updated_tags = ''
+            if re.search(account_lead_pattern, title, flags=re.IGNORECASE):
+                updated_tags = 'account_lead'
+            elif section.strip().lower() == 'planit champion'.lower():
+                updated_tags = 'planit_champion'
+            conn.execute(
+                '''
+                UPDATE contacts
+                SET contact_tags = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                ''',
+                (updated_tags, int(contact['id'])),
+            )
+
+
+def ensure_default_utm_outreach_template(db_path: Path) -> None:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        conn.execute(
+            '''
+            INSERT OR IGNORE INTO email_templates (
+                name,
+                workflow,
+                subject_template,
+                body_template
+            ) VALUES (?, ?, ?, ?)
+            ''',
+            (
+                'UTM Follow-up',
+                'UTM Adoption',
+                'UTM adoption follow-up for {market_name}',
+                (
+                    'Hello,\n\n'
+                    'Following up on UTM adoption for {market_name} ({market_code}).\n\n'
+                    'Current status:\n{status}\n\n'
+                    'Next steps:\n{next_steps}\n\n'
+                    'Please let us know if there are any blockers or updates we should capture.\n\n'
+                    'Best,\nAli'
+                ),
+            ),
+        )
+
+
+def load_email_templates_df(db_path: Path, workflow: str) -> pd.DataFrame:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        templates_df = pd.read_sql_query(
+            '''
+            SELECT id, name, workflow, subject_template, body_template, created_at, updated_at
+            FROM email_templates
+            WHERE workflow = ?
+            ORDER BY name
+            ''',
+            conn,
+            params=(workflow,),
+        )
+    return templates_df.fillna('')
+
+
+def save_email_template(
+    db_path: Path,
+    workflow: str,
+    name: str,
+    subject_template: str,
+    body_template: str,
+) -> None:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        conn.execute(
+            '''
+            INSERT INTO email_templates (
+                name,
+                workflow,
+                subject_template,
+                body_template,
+                updated_at
+            ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(name, workflow) DO UPDATE SET
+                subject_template = excluded.subject_template,
+                body_template = excluded.body_template,
+                updated_at = CURRENT_TIMESTAMP
+            ''',
+            (name.strip(), workflow.strip(), subject_template, body_template),
+        )
+
+
+def render_email_template(template_text: str, context: dict) -> str:
+    return template_text.format_map({key: context.get(key, '') for key in context})
+
+
+def _market_context_from_row(row: pd.Series) -> dict:
+    return {
+        'market_code': str(row.get('Market Code', '')).strip(),
+        'market_name': str(row.get('Market Name', '')).strip(),
+        'status': str(row.get('Status', '')).strip(),
+        'scope_gaps': str(row.get('Scope Gaps', '')).strip(),
+        'observations': str(row.get('Observations', '')).strip(),
+        'issues_identified': str(row.get('Issues Identified', '')).strip(),
+        'context': str(row.get('Context', '')).strip(),
+        'next_steps': str(row.get('Next Steps', '')).strip(),
+    }
+
+
+def _normalize_market_lookup_value(value: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '', value.strip().lower())
+
+
+def _build_market_lookup_keys(market_code: str, market_name: str) -> set[str]:
+    keys = set()
+    raw_values = {market_code, market_name}
+    alias_map = {
+        'great britain': ['uk', 'united kingdom', 'gb'],
+        'uk': ['great britain', 'united kingdom', 'gb'],
+        'united kingdom': ['uk', 'great britain', 'gb'],
+        'north america': ['pcna'],
+        'pcgb': ['uk', 'great britain', 'united kingdom', 'gb'],
+        'pib': ['portugal'],
+        'portugal': ['pib'],
+    }
+
+    for raw_value in list(raw_values):
+        normalized = _normalize_market_lookup_value(raw_value)
+        if normalized:
+            keys.add(normalized)
+
+    for raw_value in list(raw_values):
+        normalized_raw = raw_value.strip().lower()
+        if normalized_raw in alias_map:
+            for alias in alias_map[normalized_raw]:
+                normalized_alias = _normalize_market_lookup_value(alias)
+                if normalized_alias:
+                    keys.add(normalized_alias)
+    return keys
+
+
+def build_contact_rule_options(contacts_df: pd.DataFrame) -> list[str]:
+    section_values = sorted(
+        section for section in contacts_df['section'].dropna().astype(str).unique() if section.strip()
+    )
+    tag_values = sorted(
+        tag
+        for raw_tags in contacts_df['contact_tags'].dropna().astype(str)
+        for tag in [tag.strip() for tag in raw_tags.split(',')]
+        if tag
+    )
+    return [f"Section: {section}" for section in section_values] + [f"Tag: {tag}" for tag in sorted(set(tag_values))]
+
+
+def merge_unique_emails(base_emails: list[str], extra_emails: list[str]) -> list[str]:
+    merged = []
+    seen = set()
+    for email in base_emails + extra_emails:
+        normalized = str(email).strip()
+        if not normalized:
+            continue
+        email_key = normalized.lower()
+        if email_key in seen:
+            continue
+        seen.add(email_key)
+        merged.append(normalized)
+    return merged
+
+
+def resolve_market_recipients(
+    contacts_df: pd.DataFrame,
+    market_code: str,
+    market_name: str,
+    primary_rules: list[str],
+    cc_rules: list[str],
+) -> dict:
+    lookup_keys = _build_market_lookup_keys(market_code, market_name)
+    market_contacts = contacts_df.copy()
+    market_contacts['market_lookup'] = market_contacts['market'].astype(str).map(_normalize_market_lookup_value)
+    market_contacts = market_contacts[market_contacts['market_lookup'].isin(lookup_keys)].copy()
+    market_contacts['email'] = market_contacts['email'].astype(str).str.strip()
+    market_contacts['section'] = market_contacts['section'].astype(str).str.strip()
+    market_contacts = market_contacts[market_contacts['email'] != '']
+    market_contacts['contact_tags'] = market_contacts['contact_tags'].fillna('').astype(str)
+    market_contacts = market_contacts.sort_values(['section', 'name', 'email'], na_position='last')
+
+    def pick_emails_for_rules(rules: list[str], excluded_emails: set[str]) -> list[str]:
+        picked = []
+        excluded = set(excluded_emails)
+        for rule in rules:
+            selected = market_contacts.copy()
+            if rule.startswith('Section: '):
+                section_name = rule.replace('Section: ', '', 1).strip()
+                selected = selected[selected['section'] == section_name]
+            elif rule.startswith('Tag: '):
+                tag_name = rule.replace('Tag: ', '', 1).strip()
+                tag_pattern = rf'(^|,){re.escape(tag_name)}(,|$)'
+                selected = selected[selected['contact_tags'].str.contains(tag_pattern, case=False, na=False)]
+            else:
+                continue
+
+            for _, contact in selected.iterrows():
+                email = str(contact['email']).strip()
+                if not email or email.lower() in excluded:
+                    continue
+                picked.append(email)
+                excluded.add(email.lower())
+                break
+        return picked
+
+    to_emails = pick_emails_for_rules(primary_rules, set())
+    excluded = {email.lower() for email in to_emails}
+    cc_emails = pick_emails_for_rules(cc_rules, excluded)
+    missing_primary = len(to_emails) == 0
+
+    return {
+        'to_emails': to_emails,
+        'cc_emails': cc_emails,
+        'missing_primary': missing_primary,
+    }
+
+
+def get_outlook_status() -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            [sys.executable, str(BASE_DIR / 'scripts' / 'outlook_worker.py'), 'check'],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return False, 'Outlook health check timed out after 10 seconds.'
+    except Exception as exc:
+        return False, f'Outlook health check failed: {exc}'
+
+    try:
+        payload = json.loads((result.stdout or '').strip() or '{}')
+    except Exception:
+        payload = {'ok': False, 'error': (result.stderr or result.stdout or 'Unknown Outlook worker error.').strip()}
+
+    if result.returncode == 0 and payload.get('ok'):
+        return True, payload.get('message', 'Outlook COM connection is available.')
+    return False, payload.get('error', 'Unknown Outlook worker error.')
+
+
+def create_outreach_run(
+    db_path: Path,
+    workflow: str,
+    name: str,
+    filters_payload: dict,
+    template_id: Optional[int],
+) -> int:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        cursor = conn.execute(
+            '''
+            INSERT INTO outreach_runs (
+                workflow,
+                name,
+                filters_json,
+                template_id
+            ) VALUES (?, ?, ?, ?)
+            ''',
+            (workflow, name.strip(), json.dumps(filters_payload, ensure_ascii=True), template_id),
+        )
+        return int(cursor.lastrowid)
+
+
+def create_outreach_message(
+    db_path: Path,
+    run_id: int,
+    market: str,
+    status_snapshot: str,
+    to_emails: list[str],
+    cc_emails: list[str],
+    subject_rendered: str,
+    body_rendered: str,
+    sent_at: Optional[str],
+    outlook_entry_id: str,
+    outlook_conversation_id: str,
+    sync_state: str,
+) -> None:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        conn.execute(
+            '''
+            INSERT INTO outreach_messages (
+                run_id,
+                market,
+                status_snapshot,
+                to_emails,
+                cc_emails,
+                subject_rendered,
+                body_rendered,
+                sent_at,
+                outlook_entry_id,
+                outlook_conversation_id,
+                sync_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                run_id,
+                market,
+                status_snapshot,
+                '; '.join(to_emails),
+                '; '.join(cc_emails),
+                subject_rendered,
+                body_rendered,
+                sent_at,
+                outlook_entry_id,
+                outlook_conversation_id,
+                sync_state,
+            ),
+        )
+
+
+def send_or_draft_outlook_email(
+    to_emails: list[str],
+    cc_emails: list[str],
+    subject: str,
+    body: str,
+    send_mode: str,
+) -> dict:
+    try:
+        payload = json.dumps(
+            {
+                'to_emails': to_emails,
+                'cc_emails': cc_emails,
+                'subject': subject,
+                'body': body,
+                'send_mode': send_mode,
+            },
+            ensure_ascii=True,
+        )
+        result = subprocess.run(
+            [sys.executable, str(BASE_DIR / 'scripts' / 'outlook_worker.py'), 'send_or_draft', payload],
+            capture_output=True,
+            text=True,
+            timeout=25,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f'Outlook {send_mode} timed out after 25 seconds.') from exc
+    except Exception as exc:
+        raise RuntimeError(f'Outlook {send_mode} failed to start: {exc}') from exc
+
+    try:
+        response = json.loads((result.stdout or '').strip() or '{}')
+    except Exception as exc:
+        raise RuntimeError((result.stderr or result.stdout or 'Unknown Outlook worker error.').strip()) from exc
+
+    if result.returncode != 0 or not response.get('ok'):
+        raise RuntimeError(response.get('error', f'Outlook {send_mode} failed.'))
+    return {
+        'entry_id': response.get('entry_id', ''),
+        'conversation_id': response.get('conversation_id', ''),
+        'sent_at': response.get('sent_at', datetime.now().isoformat(timespec='seconds')),
+        'sync_state': response.get('sync_state', send_mode),
+    }
+
+
+def load_outreach_tracker_df(db_path: Path, workflow: str) -> pd.DataFrame:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        tracker_df = pd.read_sql_query(
+            '''
+            SELECT
+                om.id,
+                om.market AS market,
+                om.status_snapshot AS current_utm_status,
+                om.sent_at AS sent_at,
+                om.to_emails AS "to",
+                om.cc_emails AS cc,
+                om.subject_rendered AS subject,
+                om.body_rendered AS body_rendered,
+                om.sync_state AS sync_state,
+                om.replied AS replied,
+                om.last_reply_at AS last_reply_at,
+                om.last_reply_from AS last_reply_from,
+                om.last_reply_snippet AS last_reply_snippet,
+                orun.name AS run_name
+            FROM outreach_messages om
+            INNER JOIN outreach_runs orun ON orun.id = om.run_id
+            WHERE orun.workflow = ?
+            ORDER BY om.id DESC
+            ''',
+            conn,
+            params=(workflow,),
+        )
+    if not tracker_df.empty and 'replied' in tracker_df.columns:
+        tracker_df['replied'] = tracker_df['replied'].astype(bool)
+    return tracker_df.fillna('')
+
+
+def load_outreach_thread_df(db_path: Path, outreach_message_id: int) -> pd.DataFrame:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        thread_df = pd.read_sql_query(
+            '''
+            SELECT
+                received_at,
+                sender_name,
+                sender_email,
+                subject,
+                snippet,
+                body_text,
+                outlook_entry_id
+            FROM outreach_replies
+            WHERE outreach_message_id = ?
+            ORDER BY received_at ASC, id ASC
+            ''',
+            conn,
+            params=(outreach_message_id,),
+        )
+    return thread_df.fillna('')
+
+
+def ensure_market_engagement_records(db_path: Path, notes_df: pd.DataFrame) -> None:
+    normalized_notes = _normalize_utm_notes_df(notes_df)
+    records = [
+        (row['market_code'], row['market_name'])
+        for _, row in normalized_notes[['market_code', 'market_name']].drop_duplicates().iterrows()
+    ]
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        conn.executemany(
+            '''
+            INSERT INTO market_engagement (
+                market_code,
+                market_name
+            ) VALUES (?, ?)
+            ON CONFLICT(market_code) DO UPDATE SET
+                market_name = excluded.market_name
+            ''',
+            records,
+        )
+
+
+def load_market_engagement_df(db_path: Path) -> pd.DataFrame:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        engagement_df = pd.read_sql_query(
+            '''
+            SELECT
+                market_code AS "Market Code",
+                market_name AS "Market Name",
+                workflow_stage AS "Stage",
+                owner AS "Owner",
+                priority AS "Priority",
+                issue_summary AS "Issue Summary",
+                latest_note AS "Latest Note",
+                next_action AS "Next Action",
+                next_action_due AS "Next Action Due",
+                first_contact_at AS "First Contact At",
+                last_contact_at AS "Last Contact At",
+                resolved_at AS "Resolved At",
+                closed_at AS "Closed At",
+                touchpoints_count AS "Touchpoints",
+                updated_at AS "Updated At"
+            FROM market_engagement
+            ORDER BY
+                CASE workflow_stage
+                    WHEN 'To Contact' THEN 1
+                    WHEN 'Sent' THEN 2
+                    WHEN 'Waiting for Reply' THEN 3
+                    WHEN 'In Progress' THEN 4
+                    WHEN 'Blocked' THEN 5
+                    WHEN 'Resolved' THEN 6
+                    WHEN 'Closed' THEN 7
+                    ELSE 99
+                END,
+                market_code
+            ''',
+            conn,
+        )
+    return engagement_df.fillna('')
+
+
+def load_market_engagement_history_df(db_path: Path, market_code: str) -> pd.DataFrame:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        history_df = pd.read_sql_query(
+            '''
+            SELECT
+                created_at AS "Created At",
+                event_type AS "Event Type",
+                workflow_stage AS "Stage",
+                note AS "Note",
+                next_action AS "Next Action"
+            FROM market_engagement_updates
+            WHERE market_code = ?
+            ORDER BY id DESC
+            ''',
+            conn,
+            params=(market_code,),
+        )
+    return history_df.fillna('')
+
+
+def save_market_engagement_update(
+    db_path: Path,
+    market_code: str,
+    market_name: str,
+    workflow_stage: str,
+    owner: str,
+    priority: str,
+    issue_summary: str,
+    latest_note: str,
+    next_action: str,
+    next_action_due: str,
+    event_type: str = 'manual_update',
+) -> None:
+    now_value = datetime.now().isoformat(timespec='seconds')
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        existing = conn.execute(
+            '''
+            SELECT touchpoints_count, first_contact_at
+            FROM market_engagement
+            WHERE market_code = ?
+            ''',
+            (market_code,),
+        ).fetchone()
+        touchpoints_count = int(existing['touchpoints_count']) if existing else 0
+        first_contact_at = existing['first_contact_at'] if existing else ''
+
+        new_first_contact_at = first_contact_at
+        new_last_contact_at = now_value
+        new_resolved_at = now_value if workflow_stage == 'Resolved' else ''
+        new_closed_at = now_value if workflow_stage == 'Closed' else ''
+
+        if workflow_stage in {'Sent', 'Waiting for Reply', 'In Progress', 'Blocked', 'Resolved', 'Closed'} and not first_contact_at:
+            new_first_contact_at = now_value
+
+        conn.execute(
+            '''
+            INSERT INTO market_engagement (
+                market_code,
+                market_name,
+                workflow_stage,
+                owner,
+                priority,
+                issue_summary,
+                latest_note,
+                next_action,
+                next_action_due,
+                first_contact_at,
+                last_contact_at,
+                resolved_at,
+                closed_at,
+                touchpoints_count,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(market_code) DO UPDATE SET
+                market_name = excluded.market_name,
+                workflow_stage = excluded.workflow_stage,
+                owner = excluded.owner,
+                priority = excluded.priority,
+                issue_summary = excluded.issue_summary,
+                latest_note = excluded.latest_note,
+                next_action = excluded.next_action,
+                next_action_due = excluded.next_action_due,
+                first_contact_at = excluded.first_contact_at,
+                last_contact_at = excluded.last_contact_at,
+                resolved_at = excluded.resolved_at,
+                closed_at = excluded.closed_at,
+                touchpoints_count = excluded.touchpoints_count,
+                updated_at = excluded.updated_at
+            ''',
+            (
+                market_code,
+                market_name,
+                workflow_stage,
+                owner.strip(),
+                priority,
+                issue_summary.strip(),
+                latest_note.strip(),
+                next_action.strip(),
+                next_action_due.strip(),
+                new_first_contact_at,
+                new_last_contact_at,
+                new_resolved_at,
+                new_closed_at,
+                touchpoints_count + 1,
+                now_value,
+            ),
+        )
+        conn.execute(
+            '''
+            INSERT INTO market_engagement_updates (
+                market_code,
+                event_type,
+                workflow_stage,
+                note,
+                next_action,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                market_code,
+                event_type,
+                workflow_stage,
+                latest_note.strip(),
+                next_action.strip(),
+                now_value,
+            ),
+        )
+
+
+def load_market_engagement_kpis(db_path: Path) -> dict:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        summary = conn.execute(
+            '''
+            SELECT
+                COUNT(*) AS total_markets,
+                SUM(CASE WHEN workflow_stage NOT IN ('To Contact') THEN 1 ELSE 0 END) AS engaged_markets,
+                SUM(CASE WHEN workflow_stage = 'Blocked' THEN 1 ELSE 0 END) AS blocked_markets,
+                SUM(CASE WHEN workflow_stage = 'Resolved' THEN 1 ELSE 0 END) AS resolved_markets,
+                SUM(CASE WHEN workflow_stage = 'Closed' THEN 1 ELSE 0 END) AS closed_markets,
+                SUM(touchpoints_count) AS total_touchpoints
+            FROM market_engagement
+            '''
+        ).fetchone()
+    return {
+        'total_markets': int(summary['total_markets'] or 0),
+        'engaged_markets': int(summary['engaged_markets'] or 0),
+        'blocked_markets': int(summary['blocked_markets'] or 0),
+        'resolved_markets': int(summary['resolved_markets'] or 0),
+        'closed_markets': int(summary['closed_markets'] or 0),
+        'total_touchpoints': int(summary['total_touchpoints'] or 0),
+    }
+
+
+def sync_outlook_replies(db_path: Path, workflow: str) -> int:
+    try:
+        result = subprocess.run(
+            [sys.executable, str(BASE_DIR / 'scripts' / 'outlook_worker.py'), 'sync_replies', str(db_path), workflow],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError('Reply sync timed out after 30 seconds.') from exc
+    except Exception as exc:
+        raise RuntimeError(f'Reply sync failed to start: {exc}') from exc
+
+    try:
+        response = json.loads((result.stdout or '').strip() or '{}')
+    except Exception as exc:
+        raise RuntimeError((result.stderr or result.stdout or 'Unknown Outlook worker error.').strip()) from exc
+
+    if result.returncode != 0 or not response.get('ok'):
+        raise RuntimeError(response.get('error', 'Reply sync failed.'))
+    return int(response.get('updated', 0))
+
+
+def fetch_and_store_utm_threads(db_path: Path, subject_keyword: str) -> int:
+    try:
+        result = subprocess.run(
+            [sys.executable, str(BASE_DIR / 'scripts' / 'outlook_worker.py'), 'fetch_utm_threads', subject_keyword],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError('Thread fetch timed out after 60 seconds.') from exc
+    except Exception as exc:
+        raise RuntimeError(f'Thread fetch failed to start: {exc}') from exc
+
+    try:
+        response = json.loads((result.stdout or '').strip() or '{}')
+    except Exception as exc:
+        raise RuntimeError((result.stderr or result.stdout or 'Unknown Outlook worker error.').strip()) from exc
+
+    if result.returncode != 0 or not response.get('ok'):
+        raise RuntimeError(response.get('error', 'Thread fetch failed.'))
+
+    threads = response.get('threads', [])
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        for thread in threads:
+            conn.execute(
+                '''
+                INSERT INTO utm_sent_threads (conversation_id, subject, first_sent_at, last_activity_at, message_count, participant_emails, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    subject = excluded.subject,
+                    first_sent_at = excluded.first_sent_at,
+                    last_activity_at = excluded.last_activity_at,
+                    message_count = excluded.message_count,
+                    participant_emails = excluded.participant_emails,
+                    fetched_at = excluded.fetched_at
+                ''',
+                (
+                    thread['conversation_id'],
+                    thread['subject'],
+                    thread['first_sent_at'],
+                    thread['last_activity_at'],
+                    thread['message_count'],
+                    thread['participant_emails'],
+                    datetime.now().isoformat(timespec='seconds'),
+                ),
+            )
+            thread_id = conn.execute(
+                'SELECT id FROM utm_sent_threads WHERE conversation_id = ?',
+                (thread['conversation_id'],),
+            ).fetchone()[0]
+            conn.execute('DELETE FROM utm_sent_thread_messages WHERE thread_id = ?', (thread_id,))
+            for msg in thread.get('messages', []):
+                conn.execute(
+                    '''
+                    INSERT INTO utm_sent_thread_messages
+                        (thread_id, outlook_entry_id, direction, sender_email, sender_name, to_emails, cc_emails, timestamp, subject, body_text)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''',
+                    (
+                        thread_id,
+                        msg.get('outlook_entry_id', ''),
+                        msg.get('direction', 'received'),
+                        msg.get('sender_email', ''),
+                        msg.get('sender_name', ''),
+                        msg.get('to_emails', ''),
+                        msg.get('cc_emails', ''),
+                        msg.get('timestamp', ''),
+                        msg.get('subject', ''),
+                        msg.get('body_text', ''),
+                    ),
+                )
+    return len(threads)
+
+
+def load_utm_threads_df(db_path: Path) -> pd.DataFrame:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        rows = conn.execute(
+            'SELECT id, subject, first_sent_at, last_activity_at, message_count, participant_emails, fetched_at FROM utm_sent_threads ORDER BY first_sent_at DESC'
+        ).fetchall()
+    if not rows:
+        return pd.DataFrame(columns=['id', 'Subject', 'First Sent', 'Last Activity', 'Messages', 'Participants', 'Fetched At'])
+    return pd.DataFrame(
+        [dict(r) for r in rows],
+        columns=['id', 'subject', 'first_sent_at', 'last_activity_at', 'message_count', 'participant_emails', 'fetched_at'],
+    ).rename(columns={
+        'subject': 'Subject',
+        'first_sent_at': 'First Sent',
+        'last_activity_at': 'Last Activity',
+        'message_count': 'Messages',
+        'participant_emails': 'Participants',
+        'fetched_at': 'Fetched At',
+    })
+
+
+def load_utm_thread_contact_stats_df(db_path: Path, excluded_emails: Optional[set] = None) -> pd.DataFrame:
+    """One row per thread: subject, sent-at, To, CC, all external repliers, reply count."""
+    excluded = {e.lower() for e in (excluded_emails or set())}
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        thread_rows = conn.execute(
+            '''
+            SELECT
+                t.id,
+                t.subject,
+                t.first_sent_at,
+                (
+                    SELECT m.to_emails
+                    FROM utm_sent_thread_messages m
+                    WHERE m.thread_id = t.id AND m.direction = 'sent'
+                    ORDER BY m.timestamp ASC
+                    LIMIT 1
+                ) AS to_emails,
+                (
+                    SELECT m.cc_emails
+                    FROM utm_sent_thread_messages m
+                    WHERE m.thread_id = t.id AND m.direction = 'sent'
+                    ORDER BY m.timestamp ASC
+                    LIMIT 1
+                ) AS cc_emails
+            FROM utm_sent_threads t
+            ORDER BY t.first_sent_at DESC
+            '''
+        ).fetchall()
+        received_rows = conn.execute(
+            '''
+            SELECT thread_id, sender_name, sender_email
+            FROM utm_sent_thread_messages
+            WHERE direction = 'received'
+            ORDER BY timestamp ASC
+            '''
+        ).fetchall()
+
+    if not thread_rows:
+        return pd.DataFrame()
+
+    # Group received messages by thread, filtering out excluded/internal senders
+    thread_repliers: dict[int, list[str]] = {}
+    for r in received_rows:
+        tid = r['thread_id']
+        email = (r['sender_email'] or '').strip()
+        name = (r['sender_name'] or '').strip()
+        if email.lower() in excluded:
+            continue
+        label = f'{name} <{email}>' if name and email else (name or email)
+        if not label:
+            continue
+        if tid not in thread_repliers:
+            thread_repliers[tid] = []
+        # keep unique labels preserving order of first appearance
+        if label not in thread_repliers[tid]:
+            thread_repliers[tid].append(label)
+
+    records = []
+    for row in thread_rows:
+        tid = row['id']
+        repliers = thread_repliers.get(tid, [])
+        records.append({
+            'id': tid,
+            'Subject': row['subject'] or '',
+            'Sent At': row['first_sent_at'] or '',
+            'To': row['to_emails'] or '',
+            'CC': row['cc_emails'] or '',
+            'Responded': len(repliers) > 0,
+            'Replies': len(repliers),
+            'Replied By': ', '.join(repliers),
+        })
+
+    return pd.DataFrame(records, columns=['id', 'Subject', 'Sent At', 'To', 'CC', 'Responded', 'Replies', 'Replied By'])
+
+
+def load_utm_thread_messages_df(db_path: Path, thread_id: int) -> pd.DataFrame:
+    with _get_utm_outreach_db_connection(db_path) as conn:
+        rows = conn.execute(
+            '''
+            SELECT id, direction, sender_name, sender_email, to_emails, cc_emails, timestamp, subject, body_text
+            FROM utm_sent_thread_messages
+            WHERE thread_id = ?
+            ORDER BY timestamp ASC
+            ''',
+            (thread_id,),
+        ).fetchall()
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame([dict(r) for r in rows])
 
 
 def _pdf_escape(text: str) -> str:
@@ -1217,6 +2815,8 @@ with st.sidebar:
             'KPI vs Investment',
             'Market Alignments',
             'UTM Adoption',
+            'Taxonomy Hygiene',
+            'Budget Setting Sankey',
             'Incentive Model',
             'Weekly Market KPIs',
             'CTG Pre/Post KPI per Session',
@@ -1746,6 +3346,22 @@ if page == 'Risk Analysis':
             )
             fig.update_yaxes(title_text='Headroom %')
             st.plotly_chart(fig, use_container_width=True)
+            headroom_table_df = plot_df.sort_values('headroom_pct', ascending=False).copy()
+            show_headroom_table = st.checkbox(
+                'Show headroom table',
+                value=False,
+                key='show_headroom_table',
+                help='Display and export the aggregated table behind the headroom plot.',
+            )
+            if show_headroom_table:
+                st.dataframe(headroom_table_df, use_container_width=True)
+                st.download_button(
+                    'Download headroom table (CSV)',
+                    data=headroom_table_df.to_csv(index=False).encode('utf-8'),
+                    file_name='headroom_table.csv',
+                    mime='text/csv',
+                    key='download_headroom_table',
+                )
             if st.button('Generate headroom summary', key='headroom_summary'):
                 ordered = plot_df.sort_values('headroom_pct', ascending=False)
                 top_row = ordered.iloc[0]
@@ -1954,6 +3570,12 @@ if page == 'Risk Analysis':
                         value='',
                         placeholder='Market\t% Split\nPCGB\t22.5%\nPD\t18.8%\n...',
                         help='Paste a two-column list. Example: "PCGB<TAB>22.5%".',
+                    )
+                    hierarchical_market_channel = st.checkbox(
+                        'Allocate market first, then split within each market by channel',
+                        value=False,
+                        key='hierarchical_market_channel',
+                        help='Runs the market allocation first, then allocates each market budget across its channels.',
                     )
 
                     def _norm_label(label: str) -> str:
@@ -2184,8 +3806,225 @@ if page == 'Risk Analysis':
                             f"Max budget is below total minimum spend "
                             f"({min_total:,.2f}). Increase budget or reduce minimums."
                         )
+
+                    def _allocate_from_fit_params(
+                        local_fit_params,
+                        local_budget,
+                        local_weights=None,
+                        local_min_map=None,
+                        local_max_map=None,
+                        use_constraints=False,
+                    ):
+                        if not local_fit_params or local_budget <= 0:
+                            return pd.DataFrame(), pd.DataFrame()
+
+                        local_weights = local_weights or {}
+                        local_min_map = local_min_map or {label: 0.0 for label in local_fit_params.keys()}
+                        local_max_map = local_max_map or {label: 0.0 for label in local_fit_params.keys()}
+
+                        max_d0 = max((a / b) for a, b in local_fit_params.values())
+
+                        def _total_spend_for_lambda(lam):
+                            total = 0.0
+                            for a, b in local_fit_params.values():
+                                x = (a * b / lam) ** 0.5 - b
+                                if x < 0:
+                                    x = 0.0
+                                total += x
+                            return total
+
+                        unconstrained_rows = []
+                        if max_d0 > 0:
+                            low_lam = 1e-12
+                            high_lam = max_d0
+                            for _ in range(80):
+                                mid = (low_lam + high_lam) / 2
+                                total = _total_spend_for_lambda(mid)
+                                if total > local_budget:
+                                    low_lam = mid
+                                else:
+                                    high_lam = mid
+                            lam = high_lam
+                            for group_label, (a, b) in local_fit_params.items():
+                                x = (a * b / lam) ** 0.5 - b
+                                if x < 0:
+                                    x = 0.0
+                                unconstrained_rows.append({
+                                    'group': group_label,
+                                    'min_spend': 0.0,
+                                    'allocated_spend': x,
+                                    'allocated_pct': (x / local_budget * 100.0) if local_budget > 0 else 0.0,
+                                    'expected_dcfs': _saturation_curve(x, a, b) if x > 0 else 0.0,
+                                })
+                        spend_df_local = pd.DataFrame(unconstrained_rows)
+                        if not spend_df_local.empty:
+                            total_alloc = spend_df_local['allocated_spend'].sum()
+                            if total_alloc > 0 and local_budget > 0:
+                                scale_factor = local_budget / total_alloc
+                                spend_df_local['allocated_spend'] = spend_df_local['allocated_spend'] * scale_factor
+                                spend_df_local['allocated_pct'] = spend_df_local['allocated_spend'] / local_budget * 100.0
+                                spend_df_local['expected_dcfs'] = spend_df_local.apply(
+                                    lambda r: _saturation_curve(r['allocated_spend'], *local_fit_params[r['group']])
+                                    if r['allocated_spend'] > 0 else 0.0,
+                                    axis=1,
+                                )
+
+                        spend_shares = {
+                            row['group']: (row['allocated_spend'] / local_budget) if local_budget > 0 else 0.0
+                            for _, row in spend_df_local.iterrows()
+                        }
+                        total_weight = sum(max(0.0, float(local_weights.get(label, 0.0))) for label in local_fit_params.keys())
+                        if total_weight <= 0:
+                            total_weight = float(len(local_fit_params))
+                            local_weights = {label: 1.0 for label in local_fit_params.keys()}
+                        driver_shares = {
+                            label: max(0.0, float(local_weights.get(label, 0.0))) / total_weight
+                            for label in local_fit_params.keys()
+                        }
+                        spend_lambda = 1.0 - float(constraint_strength)
+                        spend_lambda = min(1.0, max(0.0, spend_lambda))
+                        blended_shares = {
+                            label: spend_lambda * spend_shares.get(label, 0.0) + (1.0 - spend_lambda) * driver_shares.get(label, 0.0)
+                            for label in local_fit_params.keys()
+                        }
+
+                        alloc_rows_local = []
+                        if use_constraints:
+                            local_min_total = sum(local_min_map.get(k, 0.0) for k in local_fit_params.keys())
+                            remaining = local_budget - local_min_total
+                            if remaining < 0:
+                                return spend_df_local, pd.DataFrame()
+                            adjustable = [k for k in local_fit_params.keys() if blended_shares.get(k, 0.0) > 0]
+                            share_sum = sum(blended_shares.get(k, 0.0) for k in adjustable)
+                            for label, (a, b) in local_fit_params.items():
+                                base = remaining * (blended_shares[label] / share_sum) if share_sum > 0 and label in adjustable else 0.0
+                                x = local_min_map.get(label, 0.0) + base
+                                alloc_rows_local.append({
+                                    'group': label,
+                                    'min_spend': local_min_map.get(label, 0.0),
+                                    'allocated_spend': x,
+                                    'allocated_pct': (x / local_budget * 100.0) if local_budget > 0 else 0.0,
+                                    'expected_dcfs': _saturation_curve(x, a, b) if x > 0 else 0.0,
+                                })
+                            alloc = {row['group']: row['allocated_spend'] for row in alloc_rows_local}
+                            caps = {
+                                k: (local_max_map.get(k, 0.0) if local_max_map.get(k, 0.0) > 0 else float('inf'))
+                                for k in alloc.keys()
+                            }
+                            shares = {k: blended_shares.get(k, 0.0) for k in alloc.keys()}
+                            while True:
+                                overflow = 0.0
+                                capped = set()
+                                for k, v in alloc.items():
+                                    cap = caps.get(k, float('inf'))
+                                    if v > cap:
+                                        overflow += v - cap
+                                        alloc[k] = cap
+                                        capped.add(k)
+                                if overflow <= 1e-6:
+                                    break
+                                candidates = [k for k in alloc.keys() if k not in capped and caps.get(k, float('inf')) > alloc[k]]
+                                if not candidates:
+                                    break
+                                share_sum = sum(shares.get(k, 0.0) for k in candidates)
+                                if share_sum <= 0:
+                                    break
+                                for k in candidates:
+                                    alloc[k] += overflow * (shares.get(k, 0.0) / share_sum)
+                            alloc_rows_local = []
+                            for label, (a, b) in local_fit_params.items():
+                                x = float(alloc.get(label, 0.0))
+                                alloc_rows_local.append({
+                                    'group': label,
+                                    'min_spend': local_min_map.get(label, 0.0),
+                                    'allocated_spend': x,
+                                    'allocated_pct': (x / local_budget * 100.0) if local_budget > 0 else 0.0,
+                                    'expected_dcfs': _saturation_curve(x, a, b) if x > 0 else 0.0,
+                                })
+                        else:
+                            for label, (a, b) in local_fit_params.items():
+                                x = local_budget * blended_shares.get(label, 0.0)
+                                alloc_rows_local.append({
+                                    'group': label,
+                                    'min_spend': 0.0,
+                                    'allocated_spend': x,
+                                    'allocated_pct': (x / local_budget * 100.0) if local_budget > 0 else 0.0,
+                                    'expected_dcfs': _saturation_curve(x, a, b) if x > 0 else 0.0,
+                                })
+                        return spend_df_local, pd.DataFrame(alloc_rows_local)
+
+                    def _channel_sort_order(channel_label):
+                        channel_text = str(channel_label).strip().lower()
+                        if 'search' in channel_text:
+                            return 0
+                        if 'social' in channel_text:
+                            return 1
+                        return 2
+
+                    def _build_hierarchical_detail_table(source_df, spend_col, dcfs_col):
+                        if (
+                            not hierarchical_market_channel
+                            or source_df is None
+                            or source_df.empty
+                            or 'Market' not in curve_data.columns
+                            or 'Channel' not in curve_data.columns
+                        ):
+                            return pd.DataFrame()
+                        detail_rows = []
+                        total_budget_value = float(budget) if budget > 0 else 0.0
+                        for _, market_row in source_df.iterrows():
+                            market_label = str(market_row['group'])
+                            market_budget = float(market_row.get(spend_col, 0.0) or 0.0)
+                            if market_budget <= 0:
+                                continue
+                            market_curve = curve_data[curve_data['Market'].astype(str) == market_label].copy()
+                            if market_curve.empty:
+                                continue
+                            channel_summary = (
+                                market_curve.groupby('Channel', dropna=False)
+                                .agg({'Media Spend': 'sum', 'DCFS': 'sum'})
+                                .reset_index()
+                            )
+                            if channel_summary.empty:
+                                continue
+                            total_channel_dcfs = float(channel_summary['DCFS'].sum())
+                            total_channel_spend = float(channel_summary['Media Spend'].sum())
+                            if total_channel_dcfs > 0:
+                                channel_summary['channel_share'] = channel_summary['DCFS'] / total_channel_dcfs
+                            elif total_channel_spend > 0:
+                                channel_summary['channel_share'] = channel_summary['Media Spend'] / total_channel_spend
+                            else:
+                                channel_summary['channel_share'] = 1.0 / len(channel_summary)
+                            channel_summary['estimated_efficiency'] = channel_summary.apply(
+                                lambda r: (float(r['DCFS']) / float(r['Media Spend']))
+                                if pd.notna(r['Media Spend']) and float(r['Media Spend']) > 0
+                                else 0.0,
+                                axis=1,
+                            )
+                            for _, channel_row in channel_summary.iterrows():
+                                allocated_spend = market_budget * float(channel_row['channel_share'])
+                                detail_rows.append({
+                                    'market': market_label,
+                                    'channel': str(channel_row['Channel']),
+                                    spend_col: allocated_spend,
+                                    f'{spend_col}_pct_total': (allocated_spend / total_budget_value * 100.0) if total_budget_value > 0 else 0.0,
+                                    f'{spend_col}_pct_within_market': (allocated_spend / market_budget * 100.0) if market_budget > 0 else 0.0,
+                                    dcfs_col: allocated_spend * float(channel_row['estimated_efficiency']),
+                                })
+                        detail_df = pd.DataFrame(detail_rows)
+                        if not detail_df.empty and 'channel' in detail_df.columns:
+                            detail_df['_channel_sort'] = detail_df['channel'].map(_channel_sort_order)
+                            detail_df = detail_df.sort_values(['market', '_channel_sort', 'channel'], na_position='last')
+                            detail_df = detail_df.drop(columns=['_channel_sort'])
+                        return detail_df
                     run_allocation = st.button('Run allocation', key='run_allocation')
                     if run_allocation:
+                        if hierarchical_market_channel and ('Market' not in curve_data.columns or 'Channel' not in curve_data.columns):
+                            st.warning('Hierarchical market-to-channel allocation requires Market and Channel columns.')
+                            st.stop()
+                        if hierarchical_market_channel and group_by != 'Market':
+                            st.warning('Hierarchical allocation requires the page grouping to be set to Market.')
+                            st.stop()
                         if use_min_constraints:
                             min_map = {
                                 str(row['group']): float(row['min_spend'] or 0.0)
@@ -2230,8 +4069,8 @@ if page == 'Risk Analysis':
                                 .mean()
                                 .to_dict()
                             )
-
-                        def _weight_for_label(label: str, headroom_l: float, scale_l: float) -> float:
+                        weights = {}
+                        for label in fit_params.keys():
                             h = headroom_map.get(label, 0.0)
                             if h is None or pd.isna(h):
                                 h = 0.0
@@ -2239,85 +4078,20 @@ if page == 'Risk Analysis':
                             if s is None or pd.isna(s):
                                 s = 0.0
                             s = float(s) / 100.0
-                            return max(0.0, headroom_l * float(h) + scale_l * s)
+                            weights[label] = max(
+                                0.0,
+                                (headroom_lambda if use_headroom_weighting else 0.0) * float(h)
+                                + (scale_lambda if use_scale_weighting else 0.0) * s,
+                            )
 
-                        def _spend_only_allocation() -> pd.DataFrame:
-                            max_d0 = 0.0
-                            for label, (a, b) in fit_params.items():
-                                max_d0 = max(max_d0, a / b)
-                            if max_d0 <= 0:
-                                return pd.DataFrame()
-
-                            def _total_spend_for_lambda(lam):
-                                total = 0.0
-                                for label, (a, b) in fit_params.items():
-                                    x = (a * b / lam) ** 0.5 - b
-                                    if x < 0:
-                                        x = 0.0
-                                    total += x
-                                return total
-
-                            low_lam = 1e-12
-                            high_lam = max_d0
-                            for _ in range(80):
-                                mid = (low_lam + high_lam) / 2
-                                total = _total_spend_for_lambda(mid)
-                                if total > budget:
-                                    low_lam = mid
-                                else:
-                                    high_lam = mid
-                            lam = high_lam
-
-                            rows = []
-                            for group_label, (a, b) in fit_params.items():
-                                x = (a * b / lam) ** 0.5 - b
-                                if x < 0:
-                                    x = 0.0
-                                y = _saturation_curve(x, a, b) if x > 0 else 0.0
-                                rows.append({
-                                    'group': group_label,
-                                    'min_spend': 0.0,
-                                    'allocated_spend': x,
-                                    'allocated_pct': (x / budget * 100.0) if budget > 0 else 0.0,
-                                    'expected_dcfs': y,
-                                })
-                            df_out = pd.DataFrame(rows)
-                            total_alloc = df_out['allocated_spend'].sum()
-                            if total_alloc > 0 and budget > 0:
-                                scale = budget / total_alloc
-                                df_out['allocated_spend'] = df_out['allocated_spend'] * scale
-                                df_out['allocated_pct'] = (df_out['allocated_spend'] / budget) * 100.0
-                                df_out['expected_dcfs'] = df_out.apply(
-                                    lambda r: _saturation_curve(r['allocated_spend'], *fit_params[r['group']])
-                                    if r['allocated_spend'] > 0 else 0.0,
-                                    axis=1,
-                                )
-                            return df_out
-
-                        spend_df = _spend_only_allocation()
-                        spend_shares = {
-                            row['group']: (row['allocated_spend'] / budget) if budget > 0 else 0.0
-                            for _, row in spend_df.iterrows()
-                        }
-
-                        weights = {}
-                        total_weight = 0.0
-                        for label in fit_params.keys():
-                            w = _weight_for_label(label, headroom_lambda if use_headroom_weighting else 0.0, scale_lambda if use_scale_weighting else 0.0)
-                            weights[label] = w
-                            total_weight += w
-                        if total_weight <= 0:
-                            total_weight = float(len(weights))
-                            weights = {k: 1.0 for k in weights}
-
-                        driver_shares = {label: weights[label] / total_weight for label in weights}
-                        spend_lambda = 1.0 - float(constraint_strength)
-                        spend_lambda = min(1.0, max(0.0, spend_lambda))
-                        blended_shares = {}
-                        for label in fit_params.keys():
-                            q = spend_shares.get(label, 0.0)
-                            p = driver_shares.get(label, 0.0)
-                            blended_shares[label] = spend_lambda * q + (1.0 - spend_lambda) * p
+                        alloc_df_unconstrained, alloc_df_constrained = _allocate_from_fit_params(
+                            fit_params,
+                            float(budget),
+                            local_weights=weights,
+                            local_min_map=min_map,
+                            local_max_map=max_map,
+                            use_constraints=use_min_constraints,
+                        )
 
                         reverse_total = sum(max(0.0, v) for v in reverse_pct_map.values())
                         if reverse_total <= 0:
@@ -2327,82 +4101,6 @@ if page == 'Risk Analysis':
                                 k: max(0.0, reverse_pct_map.get(k, 0.0)) / reverse_total
                                 for k in fit_params.keys()
                             }
-
-                        alloc_rows = []
-                        if use_min_constraints:
-                            min_total = sum(min_map.get(k, 0.0) for k in fit_params.keys())
-                            remaining = budget - min_total
-                            if remaining < 0:
-                                st.warning('Total minimum spend exceeds the max budget.')
-                                st.stop()
-                            adjustable = [k for k in fit_params.keys() if blended_shares.get(k, 0.0) > 0]
-                            share_sum = sum(blended_shares.get(k, 0.0) for k in adjustable)
-                            for label, (a, b) in fit_params.items():
-                                base = 0.0
-                                if share_sum > 0 and label in adjustable:
-                                    base = remaining * (blended_shares[label] / share_sum)
-                                x = min_map.get(label, 0.0) + base
-                                y = _saturation_curve(x, a, b) if x > 0 else 0.0
-                                alloc_rows.append({
-                                    'group': label,
-                                    'min_spend': min_map.get(label, 0.0),
-                                    'allocated_spend': x,
-                                    'allocated_pct': (x / budget * 100.0) if budget > 0 else 0.0,
-                                    'expected_dcfs': y,
-                                })
-                            # Enforce max_spend caps and redistribute overflow.
-                            alloc = {row['group']: row['allocated_spend'] for row in alloc_rows}
-                            caps = {
-                                k: (max_map.get(k, 0.0) if max_map.get(k, 0.0) > 0 else float('inf'))
-                                for k in alloc.keys()
-                            }
-                            shares = {k: blended_shares.get(k, 0.0) for k in alloc.keys()}
-                            while True:
-                                overflow = 0.0
-                                capped = set()
-                                for k, v in alloc.items():
-                                    cap = caps.get(k, float('inf'))
-                                    if v > cap:
-                                        overflow += v - cap
-                                        alloc[k] = cap
-                                        capped.add(k)
-                                if overflow <= 1e-6:
-                                    break
-                                candidates = [k for k in alloc.keys() if k not in capped and caps.get(k, float('inf')) > alloc[k]]
-                                if not candidates:
-                                    st.warning('Max spend caps prevent full budget allocation.')
-                                    break
-                                share_sum = sum(shares.get(k, 0.0) for k in candidates)
-                                if share_sum <= 0:
-                                    st.warning('No available share to redistribute max cap overflow.')
-                                    break
-                                for k in candidates:
-                                    alloc[k] += overflow * (shares.get(k, 0.0) / share_sum)
-                            # Rebuild alloc_rows with capped values.
-                            alloc_rows = []
-                            for label, (a, b) in fit_params.items():
-                                x = float(alloc.get(label, 0.0))
-                                y = _saturation_curve(x, a, b) if x > 0 else 0.0
-                                alloc_rows.append({
-                                    'group': label,
-                                    'min_spend': min_map.get(label, 0.0),
-                                    'allocated_spend': x,
-                                    'allocated_pct': (x / budget * 100.0) if budget > 0 else 0.0,
-                                    'expected_dcfs': y,
-                                })
-                        else:
-                            for label, (a, b) in fit_params.items():
-                                x = budget * blended_shares.get(label, 0.0)
-                                y = _saturation_curve(x, a, b) if x > 0 else 0.0
-                                alloc_rows.append({
-                                    'group': label,
-                                    'min_spend': 0.0,
-                                    'allocated_spend': x,
-                                    'allocated_pct': (x / budget * 100.0) if budget > 0 else 0.0,
-                                    'expected_dcfs': y,
-                                })
-                        alloc_df_constrained = pd.DataFrame(alloc_rows)
-                        alloc_df_unconstrained = spend_df
 
                         if alloc_df_unconstrained is not None and not alloc_df_unconstrained.empty:
                             reverse_alloc_unconstrained = alloc_df_unconstrained[['group']].copy()
@@ -2465,9 +4163,54 @@ if page == 'Risk Analysis':
                                 ) if r['allocated_with_reverse'] > 0 else 0.0,
                                 axis=1,
                             )
+                        detailed_alloc_df_unconstrained = _build_hierarchical_detail_table(
+                            alloc_df_unconstrained,
+                            'allocated_spend',
+                            'expected_dcfs',
+                        ).rename(columns={
+                            'allocated_spend': 'allocated_without_constraint',
+                            'allocated_spend_pct_total': 'allocated_without_constraint_pct_total',
+                            'allocated_spend_pct_within_market': 'allocated_without_constraint_pct_within_market',
+                            'expected_dcfs': 'dcfs_without_constraint',
+                        })
+                        detailed_alloc_df_constrained = _build_hierarchical_detail_table(
+                            alloc_df_constrained,
+                            'allocated_spend',
+                            'expected_dcfs',
+                        ).rename(columns={
+                            'allocated_spend': 'allocated_with_constraint',
+                            'allocated_spend_pct_total': 'allocated_with_constraint_pct_total',
+                            'allocated_spend_pct_within_market': 'allocated_with_constraint_pct_within_market',
+                            'expected_dcfs': 'dcfs_with_constraint',
+                        })
+                        detailed_alloc_df_blended_unconstrained = _build_hierarchical_detail_table(
+                            alloc_df_unconstrained,
+                            'allocated_with_reverse',
+                            'dcfs_with_reverse',
+                        ).rename(columns={
+                            'allocated_with_reverse': 'blended_alloc_without_constraint',
+                            'allocated_with_reverse_pct_total': 'blended_alloc_without_constraint_pct_total',
+                            'allocated_with_reverse_pct_within_market': 'blended_alloc_without_constraint_pct_within_market',
+                            'dcfs_with_reverse': 'blended_dcfs_without_constraint',
+                        })
+                        detailed_alloc_df_blended_constrained = _build_hierarchical_detail_table(
+                            alloc_df_constrained,
+                            'allocated_with_reverse',
+                            'dcfs_with_reverse',
+                        ).rename(columns={
+                            'allocated_with_reverse': 'blended_alloc_with_constraint',
+                            'allocated_with_reverse_pct_total': 'blended_alloc_with_constraint_pct_total',
+                            'allocated_with_reverse_pct_within_market': 'blended_alloc_with_constraint_pct_within_market',
+                            'dcfs_with_reverse': 'blended_dcfs_with_constraint',
+                        })
                         st.session_state['alloc_state'] = {
                             'alloc_df_unconstrained': alloc_df_unconstrained,
                             'alloc_df_constrained': alloc_df_constrained,
+                            'detailed_alloc_df_unconstrained': detailed_alloc_df_unconstrained,
+                            'detailed_alloc_df_constrained': detailed_alloc_df_constrained,
+                            'detailed_alloc_df_blended_unconstrained': detailed_alloc_df_blended_unconstrained,
+                            'detailed_alloc_df_blended_constrained': detailed_alloc_df_blended_constrained,
+                            'hierarchical_market_channel': hierarchical_market_channel,
                             'use_min_constraints': use_min_constraints,
                             'use_headroom_weighting': use_headroom_weighting,
                             'use_scale_weighting': use_scale_weighting,
@@ -2495,10 +4238,16 @@ if page == 'Risk Analysis':
                     if alloc_state:
                         alloc_df_unconstrained = alloc_state.get('alloc_df_unconstrained')
                         alloc_df_constrained = alloc_state.get('alloc_df_constrained')
+                        detailed_alloc_df_unconstrained = alloc_state.get('detailed_alloc_df_unconstrained')
+                        detailed_alloc_df_constrained = alloc_state.get('detailed_alloc_df_constrained')
+                        detailed_alloc_df_blended_unconstrained = alloc_state.get('detailed_alloc_df_blended_unconstrained')
+                        detailed_alloc_df_blended_constrained = alloc_state.get('detailed_alloc_df_blended_constrained')
+                        hierarchical_market_channel = bool(alloc_state.get('hierarchical_market_channel'))
                         st.subheader('Optimal budget split')
                         if alloc_df_unconstrained is None or alloc_df_unconstrained.empty:
                             st.info('No allocation available.')
                         else:
+                            display_compare_df = None
                             total_dcfs_unconstrained = float(alloc_df_unconstrained['expected_dcfs'].sum())
                             total_dcfs_constrained = (
                                 float(alloc_df_constrained['expected_dcfs'].sum())
@@ -2515,6 +4264,14 @@ if page == 'Risk Analysis':
                                 and 'dcfs_with_reverse' in alloc_df_constrained.columns
                                 else None
                             )
+                            if hierarchical_market_channel and detailed_alloc_df_unconstrained is not None and not detailed_alloc_df_unconstrained.empty:
+                                total_dcfs_unconstrained = float(detailed_alloc_df_unconstrained['dcfs_without_constraint'].sum()) if 'dcfs_without_constraint' in detailed_alloc_df_unconstrained.columns else total_dcfs_unconstrained
+                                if detailed_alloc_df_constrained is not None and not detailed_alloc_df_constrained.empty and 'dcfs_with_constraint' in detailed_alloc_df_constrained.columns:
+                                    total_dcfs_constrained = float(detailed_alloc_df_constrained['dcfs_with_constraint'].sum())
+                                if detailed_alloc_df_blended_unconstrained is not None and not detailed_alloc_df_blended_unconstrained.empty and 'blended_dcfs_without_constraint' in detailed_alloc_df_blended_unconstrained.columns:
+                                    total_dcfs_blended_unconstrained = float(detailed_alloc_df_blended_unconstrained['blended_dcfs_without_constraint'].sum())
+                                if detailed_alloc_df_blended_constrained is not None and not detailed_alloc_df_blended_constrained.empty and 'blended_dcfs_with_constraint' in detailed_alloc_df_blended_constrained.columns:
+                                    total_dcfs_blended_constrained = float(detailed_alloc_df_blended_constrained['blended_dcfs_with_constraint'].sum())
 
                             c1, c2, c3, c4 = st.columns(4)
                             c1.metric('Total DCFS (without constraints)', f'{total_dcfs_unconstrained:,.2f}')
@@ -2530,42 +4287,89 @@ if page == 'Risk Analysis':
                                 c4.metric('Total DCFS (blended, with constraints)', f'{total_dcfs_blended_constrained:,.2f}')
                             else:
                                 c4.metric('Total DCFS (blended, with constraints)', 'n/a')
-                            if alloc_state.get('use_min_constraints') or alloc_state.get('use_headroom_weighting') or alloc_state.get('use_scale_weighting') or alloc_state.get('use_spend_weighting'):
+                            if hierarchical_market_channel or alloc_state.get('use_min_constraints') or alloc_state.get('use_headroom_weighting') or alloc_state.get('use_scale_weighting') or alloc_state.get('use_spend_weighting'):
                                 min_map = alloc_state.get('min_map', {})
                                 max_map = alloc_state.get('max_map', {})
-                                left = alloc_df_unconstrained.rename(columns={
-                                    'allocated_spend': 'allocated_without_constraint',
-                                    'allocated_pct': 'pct_without_constraint',
-                                    'expected_dcfs': 'dcfs_without_constraint',
-                                    'allocated_with_reverse': 'blended_alloc_without_constraint',
-                                    'pct_with_reverse': 'blended_pct_without_constraint',
-                                    'dcfs_with_reverse': 'blended_dcfs_without_constraint',
-                                })[['group', 'allocated_without_constraint', 'pct_without_constraint', 'dcfs_without_constraint', 'blended_alloc_without_constraint', 'blended_pct_without_constraint', 'blended_dcfs_without_constraint']]
-                                left['min_spend'] = left['group'].map(lambda g: min_map.get(g, 0.0))
-                                left['max_spend'] = left['group'].map(lambda g: max_map.get(g, 0.0))
-                                left = left[['group', 'min_spend', 'max_spend', 'allocated_without_constraint', 'pct_without_constraint', 'dcfs_without_constraint', 'blended_alloc_without_constraint', 'blended_pct_without_constraint', 'blended_dcfs_without_constraint']]
-                                if alloc_df_constrained is not None and not alloc_df_constrained.empty:
-                                    right = alloc_df_constrained.rename(columns={
-                                        'allocated_spend': 'allocated_with_constraint',
-                                        'allocated_pct': 'pct_with_constraint',
-                                        'expected_dcfs': 'dcfs_with_constraint',
-                                        'allocated_with_reverse': 'blended_alloc_with_constraint',
-                                        'pct_with_reverse': 'blended_pct_with_constraint',
-                                        'dcfs_with_reverse': 'blended_dcfs_with_constraint',
-                                    })[['group', 'allocated_with_constraint', 'pct_with_constraint', 'dcfs_with_constraint', 'blended_alloc_with_constraint', 'blended_pct_with_constraint', 'blended_dcfs_with_constraint']]
+                                if hierarchical_market_channel and detailed_alloc_df_unconstrained is not None and not detailed_alloc_df_unconstrained.empty:
+                                    left = detailed_alloc_df_unconstrained.copy()
+                                    if detailed_alloc_df_constrained is not None and not detailed_alloc_df_constrained.empty:
+                                        right = detailed_alloc_df_constrained.copy()
+                                    else:
+                                        right = pd.DataFrame({
+                                            'market': left['market'],
+                                            'channel': left['channel'],
+                                            'allocated_with_constraint': pd.NA,
+                                            'allocated_with_constraint_pct_total': pd.NA,
+                                            'allocated_with_constraint_pct_within_market': pd.NA,
+                                            'dcfs_with_constraint': pd.NA,
+                                        })
+                                    if detailed_alloc_df_blended_unconstrained is not None and not detailed_alloc_df_blended_unconstrained.empty:
+                                        blend_left = detailed_alloc_df_blended_unconstrained.copy()
+                                    else:
+                                        blend_left = pd.DataFrame({
+                                            'market': left['market'],
+                                            'channel': left['channel'],
+                                            'blended_alloc_without_constraint': pd.NA,
+                                            'blended_alloc_without_constraint_pct_total': pd.NA,
+                                            'blended_alloc_without_constraint_pct_within_market': pd.NA,
+                                            'blended_dcfs_without_constraint': pd.NA,
+                                        })
+                                    if detailed_alloc_df_blended_constrained is not None and not detailed_alloc_df_blended_constrained.empty:
+                                        blend_right = detailed_alloc_df_blended_constrained.copy()
+                                    else:
+                                        blend_right = pd.DataFrame({
+                                            'market': left['market'],
+                                            'channel': left['channel'],
+                                            'blended_alloc_with_constraint': pd.NA,
+                                            'blended_alloc_with_constraint_pct_total': pd.NA,
+                                            'blended_alloc_with_constraint_pct_within_market': pd.NA,
+                                            'blended_dcfs_with_constraint': pd.NA,
+                                        })
+                                    compare_df = left.merge(right, on=['market', 'channel'], how='outer')
+                                    compare_df = compare_df.merge(blend_left, on=['market', 'channel'], how='outer')
+                                    compare_df = compare_df.merge(blend_right, on=['market', 'channel'], how='outer')
+                                    compare_df['_channel_sort'] = compare_df['channel'].map(_channel_sort_order)
+                                    display_compare_df = compare_df.sort_values(
+                                        ['market', '_channel_sort', 'allocated_with_constraint', 'channel'],
+                                        ascending=[True, True, False, True],
+                                        na_position='last',
+                                    )
+                                    display_compare_df = display_compare_df.drop(columns=['_channel_sort'])
                                 else:
-                                    right = pd.DataFrame({
-                                        'group': left['group'],
-                                        'allocated_with_constraint': pd.NA,
-                                        'pct_with_constraint': pd.NA,
-                                        'dcfs_with_constraint': pd.NA,
-                                        'blended_alloc_with_constraint': pd.NA,
-                                        'blended_pct_with_constraint': pd.NA,
-                                        'blended_dcfs_with_constraint': pd.NA,
-                                    })
-                                compare_df = left.merge(right, on='group', how='outer')
+                                    left = alloc_df_unconstrained.rename(columns={
+                                        'allocated_spend': 'allocated_without_constraint',
+                                        'allocated_pct': 'pct_without_constraint',
+                                        'expected_dcfs': 'dcfs_without_constraint',
+                                        'allocated_with_reverse': 'blended_alloc_without_constraint',
+                                        'pct_with_reverse': 'blended_pct_without_constraint',
+                                        'dcfs_with_reverse': 'blended_dcfs_without_constraint',
+                                    })[['group', 'allocated_without_constraint', 'pct_without_constraint', 'dcfs_without_constraint', 'blended_alloc_without_constraint', 'blended_pct_without_constraint', 'blended_dcfs_without_constraint']]
+                                    left['min_spend'] = left['group'].map(lambda g: min_map.get(g, 0.0))
+                                    left['max_spend'] = left['group'].map(lambda g: max_map.get(g, 0.0))
+                                    left = left[['group', 'min_spend', 'max_spend', 'allocated_without_constraint', 'pct_without_constraint', 'dcfs_without_constraint', 'blended_alloc_without_constraint', 'blended_pct_without_constraint', 'blended_dcfs_without_constraint']]
+                                    if alloc_df_constrained is not None and not alloc_df_constrained.empty:
+                                        right = alloc_df_constrained.rename(columns={
+                                            'allocated_spend': 'allocated_with_constraint',
+                                            'allocated_pct': 'pct_with_constraint',
+                                            'expected_dcfs': 'dcfs_with_constraint',
+                                            'allocated_with_reverse': 'blended_alloc_with_constraint',
+                                            'pct_with_reverse': 'blended_pct_with_constraint',
+                                            'dcfs_with_reverse': 'blended_dcfs_with_constraint',
+                                        })[['group', 'allocated_with_constraint', 'pct_with_constraint', 'dcfs_with_constraint', 'blended_alloc_with_constraint', 'blended_pct_with_constraint', 'blended_dcfs_with_constraint']]
+                                    else:
+                                        right = pd.DataFrame({
+                                            'group': left['group'],
+                                            'allocated_with_constraint': pd.NA,
+                                            'pct_with_constraint': pd.NA,
+                                            'dcfs_with_constraint': pd.NA,
+                                            'blended_alloc_with_constraint': pd.NA,
+                                            'blended_pct_with_constraint': pd.NA,
+                                            'blended_dcfs_with_constraint': pd.NA,
+                                        })
+                                    compare_df = left.merge(right, on='group', how='outer')
+                                    display_compare_df = compare_df.sort_values('allocated_with_constraint', ascending=False, na_position='last')
                                 st.dataframe(
-                                    compare_df.sort_values('allocated_with_constraint', ascending=False, na_position='last'),
+                                    display_compare_df,
                                     use_container_width=True,
                                 )
                             else:
@@ -2593,8 +4397,8 @@ if page == 'Risk Analysis':
                                 models_text = ', '.join(sorted(map(str, models))) if models else ''
                                 campaigns_text = ', '.join(sorted(map(str, campaigns))) if campaigns else ''
 
-                                table_df = None
-                                if alloc_df_unconstrained is not None and not alloc_df_unconstrained.empty:
+                                table_df = display_compare_df
+                                if table_df is None and alloc_df_unconstrained is not None and not alloc_df_unconstrained.empty:
                                     left = alloc_df_unconstrained.rename(columns={
                                         'allocated_spend': 'allocated_without_constraint',
                                         'allocated_pct': 'pct_without_constraint',
@@ -2619,27 +4423,38 @@ if page == 'Risk Analysis':
                                 max_map = alloc_state.get('max_map', {})
                                 allocation_lines = []
                                 if table_df is not None:
-                                    for _, row in table_df.sort_values('group').iterrows():
-                                        min_val = min_map.get(row['group'], 0.0)
-                                        max_val = max_map.get(row['group'], 0.0)
+                                    if hierarchical_market_channel and 'market' in table_df.columns:
+                                        table_df = table_df.copy()
+                                        table_df['_channel_sort'] = table_df['channel'].map(_channel_sort_order)
+                                        iter_df = table_df.sort_values(['market', '_channel_sort', 'channel'], na_position='last')
+                                    else:
+                                        iter_df = table_df.sort_values(['group'])
+                                    for _, row in iter_df.iterrows():
+                                        row_label = (
+                                            f"{row['market']} | {row['channel']}"
+                                            if hierarchical_market_channel and 'market' in row and 'channel' in row
+                                            else row['group']
+                                        )
+                                        min_val = min_map.get(row['group'], 0.0) if 'group' in row else 0.0
+                                        max_val = max_map.get(row['group'], 0.0) if 'group' in row else 0.0
                                         def _fmt(val):
                                             if val is None or (isinstance(val, float) and pd.isna(val)):
                                                 return 'n/a'
                                             return f"{float(val):.2f}"
                                         allocation_lines.append(
-                                            f"{row['group']}: "
+                                            f"{row_label}: "
                                             f"min={min_val:.2f}, max={max_val:.2f}; "
                                             f"unconstrained={_fmt(row.get('allocated_without_constraint'))} "
-                                            f"({_fmt(row.get('pct_without_constraint'))}%), "
+                                            f"({_fmt(row.get('pct_without_constraint', row.get('allocated_without_constraint_pct_total')))}%), "
                                             f"dcfs_unconstrained={_fmt(row.get('dcfs_without_constraint'))}; "
                                             f"constrained={_fmt(row.get('allocated_with_constraint'))} "
-                                            f"({_fmt(row.get('pct_with_constraint'))}%), "
+                                            f"({_fmt(row.get('pct_with_constraint', row.get('allocated_with_constraint_pct_total')))}%), "
                                             f"dcfs_constrained={_fmt(row.get('dcfs_with_constraint'))}; "
                                             f"blend_unconstrained={_fmt(row.get('blended_alloc_without_constraint'))} "
-                                            f"({_fmt(row.get('blended_pct_without_constraint'))}%), "
+                                            f"({_fmt(row.get('blended_pct_without_constraint', row.get('blended_alloc_without_constraint_pct_total')))}%), "
                                             f"dcfs_blend_unconstrained={_fmt(row.get('blended_dcfs_without_constraint'))}; "
                                             f"blend_constrained={_fmt(row.get('blended_alloc_with_constraint'))} "
-                                            f"({_fmt(row.get('blended_pct_with_constraint'))}%), "
+                                            f"({_fmt(row.get('blended_pct_with_constraint', row.get('blended_alloc_with_constraint_pct_total')))}%), "
                                             f"dcfs_blend_constrained={_fmt(row.get('blended_dcfs_with_constraint'))}"
                                         )
                                 allocation_table_text = '\n'.join(allocation_lines) if allocation_lines else 'n/a'
@@ -3820,14 +5635,20 @@ if page == 'Market Alignments':
 if page == 'UTM Adoption':
     st.subheader('UTM Adoption')
     st.caption('Workspace for tracking market-level UTM rollout and compliance.')
-    if not UTM_NOTES_PDF_PATH.exists():
-        st.error(f'UTM notes PDF not found at `{UTM_NOTES_PDF_PATH}`.')
-        st.stop()
+    initialize_utm_outreach_db(UTM_OUTREACH_DB_PATH)
+    bootstrap_utm_notes_db(UTM_OUTREACH_DB_PATH, UTM_NOTES_PDF_PATH, UTM_NOTES_CSV_PATH)
+    bootstrap_utm_contacts_db(UTM_OUTREACH_DB_PATH, ADDRESSBOOK_CSV_PATH)
+    ensure_manual_utm_test_records(UTM_OUTREACH_DB_PATH)
+    bootstrap_contact_tags(UTM_OUTREACH_DB_PATH)
 
-    base_utm_notes_df = load_utm_adoption_notes(str(UTM_NOTES_PDF_PATH), UTM_NOTES_PDF_PATH.stat().st_mtime).fillna('')
-    persisted_utm_notes_df = load_or_create_utm_adoption_notes_csv(UTM_NOTES_PDF_PATH, UTM_NOTES_CSV_PATH)
+    utm_notes_df = load_utm_notes_from_db(UTM_OUTREACH_DB_PATH)
+    ensure_market_engagement_records(UTM_OUTREACH_DB_PATH, utm_notes_df)
     if 'utm_adoption_notes_working' not in st.session_state:
-        st.session_state['utm_adoption_notes_working'] = persisted_utm_notes_df.copy()
+        st.session_state['utm_adoption_notes_working'] = utm_notes_df.copy()
+    else:
+        current_working = st.session_state['utm_adoption_notes_working']
+        if len(current_working) != len(utm_notes_df) or list(current_working.columns) != list(utm_notes_df.columns):
+            st.session_state['utm_adoption_notes_working'] = utm_notes_df.copy()
     utm_notes_df = st.session_state['utm_adoption_notes_working']
 
     top_left, top_mid, top_right, top_reset = st.columns([1, 1, 3, 1])
@@ -3837,12 +5658,12 @@ if page == 'UTM Adoption':
         populated_status = utm_notes_df['Status'].fillna('').astype(str).str.strip().ne('').sum()
         st.metric('Statuses Captured', int(populated_status))
     with top_right:
-        st.caption(f'Source: `{UTM_NOTES_CSV_PATH}`')
-        st.caption('Edits are only written to CSV when you press `Save Changes`.')
+        st.caption(f'Source: `{UTM_OUTREACH_DB_PATH}`')
+        st.caption('Edits are written to SQLite when you press `Save Changes`.')
     with top_reset:
         if st.button('Reset Table', key='utm_reset_table'):
-            st.session_state['utm_adoption_notes_working'] = base_utm_notes_df.copy()
-            save_utm_adoption_notes_csv(base_utm_notes_df, UTM_NOTES_CSV_PATH)
+            reset_utm_notes_to_base(UTM_OUTREACH_DB_PATH)
+            st.session_state['utm_adoption_notes_working'] = load_utm_notes_from_db(UTM_OUTREACH_DB_PATH)
             st.rerun()
 
     market_options = ['All'] + utm_notes_df['Market Code'].dropna().astype(str).tolist()
@@ -3886,14 +5707,14 @@ if page == 'UTM Adoption':
     if save_submitted:
         utm_notes_df.loc[edited_notes.index, editable_cols] = edited_notes[editable_cols]
         st.session_state['utm_adoption_notes_working'] = utm_notes_df
-        save_utm_adoption_notes_csv(utm_notes_df, UTM_NOTES_CSV_PATH)
-        st.success('Saved to CSV.')
+        save_utm_notes_to_db(utm_notes_df, UTM_OUTREACH_DB_PATH)
+        st.success('Saved to SQLite.')
         st.rerun()
 
     st.download_button(
         'Download table as CSV',
         utm_notes_df.to_csv(index=False).encode('utf-8'),
-        file_name=UTM_NOTES_CSV_PATH.name,
+        file_name='utm_adoption_notes_export.csv',
         mime='text/csv',
         key='utm_adoption_download_csv',
     )
@@ -3902,14 +5723,8 @@ if page == 'UTM Adoption':
     st.subheader('Addressbook')
     st.caption('Market contacts consolidated from the PHD local market workbook.')
 
-    if not ADDRESSBOOK_CSV_PATH.exists():
-        st.error(f'Addressbook CSV not found at `{ADDRESSBOOK_CSV_PATH}`.')
-        st.stop()
-
-    addressbook_df = load_market_addressbook_csv(
-        str(ADDRESSBOOK_CSV_PATH),
-        ADDRESSBOOK_CSV_PATH.stat().st_mtime,
-    )
+    addressbook_df = annotate_addressbook_contacts(load_contacts_from_db(UTM_OUTREACH_DB_PATH))
+    outreach_db_counts = load_utm_outreach_db_counts(UTM_OUTREACH_DB_PATH)
 
     addr_left, addr_mid, addr_right = st.columns([1, 1, 3])
     with addr_left:
@@ -3917,7 +5732,7 @@ if page == 'UTM Adoption':
     with addr_mid:
         st.metric('Markets Covered', int(addressbook_df['market'].nunique()))
     with addr_right:
-        st.caption(f'Source: `{ADDRESSBOOK_CSV_PATH}`')
+        st.caption(f'Source: `{UTM_OUTREACH_DB_PATH}`')
 
     addressbook_market_options = ['All'] + sorted(
         market for market in addressbook_df['market'].dropna().astype(str).unique() if market.strip()
@@ -3925,8 +5740,9 @@ if page == 'UTM Adoption':
     addressbook_section_options = ['All'] + sorted(
         section for section in addressbook_df['section'].dropna().astype(str).unique() if section.strip()
     )
+    addressbook_contact_type_options = ['All', 'Porsche Client', 'Account Lead', 'Porsche Client + Account Lead']
 
-    addr_filter_left, addr_filter_mid, addr_filter_right = st.columns([1, 1, 2])
+    addr_filter_left, addr_filter_mid, addr_filter_right, addr_filter_far_right = st.columns([1, 1, 1, 2])
     with addr_filter_left:
         selected_addressbook_market = st.selectbox(
             'Addressbook Market',
@@ -3942,6 +5758,13 @@ if page == 'UTM Adoption':
             key='utm_addressbook_section',
         )
     with addr_filter_right:
+        selected_contact_type = st.selectbox(
+            'Contact Type',
+            addressbook_contact_type_options,
+            index=0,
+            key='utm_addressbook_contact_type',
+        )
+    with addr_filter_far_right:
         addressbook_search_term = st.text_input(
             'Search contacts',
             value='',
@@ -3953,11 +5776,32 @@ if page == 'UTM Adoption':
         filtered_addressbook = filtered_addressbook[filtered_addressbook['market'] == selected_addressbook_market]
     if selected_addressbook_section != 'All':
         filtered_addressbook = filtered_addressbook[filtered_addressbook['section'] == selected_addressbook_section]
+    if selected_contact_type != 'All':
+        filtered_addressbook = filtered_addressbook[filtered_addressbook['contact_type'] == selected_contact_type]
     if addressbook_search_term:
         addressbook_search_mask = filtered_addressbook.fillna('').apply(
             lambda column: column.astype(str).str.contains(addressbook_search_term, case=False, na=False)
         ).any(axis=1)
         filtered_addressbook = filtered_addressbook[addressbook_search_mask]
+
+    if 'utm_manual_to_emails' not in st.session_state:
+        st.session_state['utm_manual_to_emails'] = []
+    if 'utm_manual_cc_emails' not in st.session_state:
+        st.session_state['utm_manual_cc_emails'] = []
+
+    contact_picker_options = {}
+    for _, row in filtered_addressbook.iterrows():
+        label = f"{row['market']} | {row['section']} | {row['name'] or row['email']} | {row['email']}"
+        contact_picker_options[label] = str(row['email']).strip()
+
+    picked_contact_labels = st.multiselect(
+        'Pick contacts for the draft',
+        list(contact_picker_options.keys()),
+        default=[],
+        key='utm_addressbook_contact_multiselect',
+        help='Filter the addressbook first, then pick the exact contacts you want.',
+    )
+    picked_emails = [contact_picker_options[label] for label in picked_contact_labels]
 
     st.dataframe(
         filtered_addressbook,
@@ -3969,18 +5813,940 @@ if page == 'UTM Adoption':
             'name': st.column_config.TextColumn('Name', width='medium'),
             'title': st.column_config.TextColumn('Title', width='medium'),
             'email': st.column_config.TextColumn('Email', width='medium'),
+            'contact_tags': st.column_config.TextColumn('Tags', width='small'),
             'notes': st.column_config.TextColumn('Notes', width='medium'),
             'source_sheet': st.column_config.TextColumn('Source Sheet', width='small'),
+            'contact_type': st.column_config.TextColumn('Contact Type', width='small'),
         },
+    )
+
+    add_to_left, add_to_mid, add_to_right = st.columns([1, 1, 2])
+    with add_to_left:
+        if st.button('Add Selected to Draft To', key='utm_add_selected_to_to'):
+            st.session_state['utm_manual_to_emails'] = merge_unique_emails(
+                st.session_state['utm_manual_to_emails'],
+                picked_emails,
+            )
+            st.success('Selected contacts added to draft To.')
+            st.rerun()
+    with add_to_mid:
+        if st.button('Add Selected to Draft CC', key='utm_add_selected_to_cc'):
+            st.session_state['utm_manual_cc_emails'] = merge_unique_emails(
+                st.session_state['utm_manual_cc_emails'],
+                picked_emails,
+            )
+            st.success('Selected contacts added to draft CC.')
+            st.rerun()
+    with add_to_right:
+        if st.button('Clear Manual Draft Recipients', key='utm_clear_manual_recipients'):
+            st.session_state['utm_manual_to_emails'] = []
+            st.session_state['utm_manual_cc_emails'] = []
+            st.session_state['utm_addressbook_contact_multiselect'] = []
+            st.success('Manual draft recipients cleared.')
+            st.rerun()
+
+    st.caption(
+        f"Manual draft To: {', '.join(st.session_state['utm_manual_to_emails']) or 'None'}\n\n"
+        f"Manual draft CC: {', '.join(st.session_state['utm_manual_cc_emails']) or 'None'}"
     )
 
     st.download_button(
         'Download addressbook as CSV',
         filtered_addressbook.to_csv(index=False).encode('utf-8'),
-        file_name=ADDRESSBOOK_CSV_PATH.name,
+        file_name='utm_addressbook_export.csv',
         mime='text/csv',
         key='utm_addressbook_download_csv',
     )
+
+    st.divider()
+    st.subheader('Outreach')
+    st.caption('Create market-specific Outlook drafts or sends and track them in SQLite.')
+
+    ensure_default_utm_outreach_template(UTM_OUTREACH_DB_PATH)
+    templates_df = load_email_templates_df(UTM_OUTREACH_DB_PATH, 'UTM Adoption')
+    outlook_status_left, outlook_status_right = st.columns([1, 4])
+    with outlook_status_left:
+        check_outlook_clicked = st.button('Check Outlook Connection', key='utm_outlook_check')
+    with outlook_status_right:
+        st.caption('Outlook checks now run on demand in a worker process with a timeout.')
+
+    if check_outlook_clicked:
+        outlook_ready, outlook_message = get_outlook_status()
+        if outlook_ready:
+            st.success(outlook_message)
+        else:
+            st.warning(outlook_message)
+
+    outreach_status_options = sorted(
+        status for status in utm_notes_df['Status'].dropna().astype(str).unique() if status.strip()
+    )
+    outreach_filter_left, outreach_filter_mid = st.columns([2, 3])
+    with outreach_filter_left:
+        selected_outreach_statuses = st.multiselect(
+            'Statuses',
+            outreach_status_options,
+            default=[],
+            key='utm_outreach_statuses',
+        )
+    with outreach_filter_mid:
+        candidate_markets_df = utm_notes_df.copy()
+        if selected_outreach_statuses:
+            candidate_markets_df = candidate_markets_df[
+                candidate_markets_df['Status'].astype(str).isin(selected_outreach_statuses)
+            ]
+        candidate_markets = candidate_markets_df['Market Code'].dropna().astype(str).tolist()
+        selected_outreach_markets = st.multiselect(
+            'Markets to contact',
+            candidate_markets,
+            default=candidate_markets[: min(5, len(candidate_markets))],
+            key='utm_outreach_markets',
+        )
+
+    recipient_rule_options = build_contact_rule_options(addressbook_df)
+    recipient_left, recipient_mid, recipient_right = st.columns([2, 2, 2])
+    with recipient_left:
+        primary_rules = st.multiselect(
+            'Primary recipient rules',
+            recipient_rule_options,
+            default=[
+                rule for rule in ['Section: PlanIt Champion', 'Section: Market Key Contact']
+                if rule in recipient_rule_options
+            ],
+            key='utm_outreach_primary_rules',
+            help='Each selected rule contributes one recipient.',
+        )
+    with recipient_mid:
+        cc_rules = st.multiselect(
+            'CC recipient rules',
+            recipient_rule_options,
+            default=[
+                rule for rule in ['Section: Digital Contact', 'Section: Search Contact']
+                if rule in recipient_rule_options
+            ],
+            key='utm_outreach_cc_rules',
+            help='Each selected rule contributes one CC recipient.',
+        )
+    with recipient_right:
+        run_name = st.text_input(
+            'Run name',
+            value=f'UTM Adoption {datetime.now().strftime("%Y-%m-%d %H:%M")}',
+            key='utm_outreach_run_name',
+        )
+
+    st.caption('Optional fixed CC contacts')
+    optional_cc_cols = st.columns(len(OPTIONAL_UTM_CC_CONTACTS))
+    selected_optional_cc = []
+    for idx, contact in enumerate(OPTIONAL_UTM_CC_CONTACTS):
+        checkbox_key = f"utm_optional_cc_{re.sub(r'[^a-z0-9]+', '_', contact['email'].lower())}"
+        with optional_cc_cols[idx]:
+            checked = st.checkbox(
+                contact['label'],
+                value=False,
+                key=checkbox_key,
+                help=contact['email'],
+            )
+        if checked:
+            selected_optional_cc.append(contact['email'])
+
+    template_options = {
+        f"{row['name']} (#{int(row['id'])})": row
+        for _, row in templates_df.iterrows()
+    }
+    selected_template_label = st.selectbox(
+        'Email template',
+        list(template_options.keys()),
+        index=0 if template_options else None,
+        key='utm_outreach_template_select',
+    )
+    selected_template_row = template_options[selected_template_label] if selected_template_label else None
+    selected_template_id = int(selected_template_row['id']) if selected_template_row is not None else None
+
+    if selected_template_row is not None:
+        loaded_template_id = st.session_state.get('utm_outreach_loaded_template_id')
+        if loaded_template_id != selected_template_id:
+            st.session_state['utm_outreach_template_name'] = str(selected_template_row['name'])
+            st.session_state['utm_outreach_subject_template'] = str(selected_template_row['subject_template'])
+            st.session_state['utm_outreach_body_template'] = str(selected_template_row['body_template'])
+            st.session_state['utm_outreach_loaded_template_id'] = selected_template_id
+
+    template_name = st.text_input('Template name', key='utm_outreach_template_name')
+    subject_template = st.text_input('Subject template', key='utm_outreach_subject_template')
+    body_template = st.text_area('Body template', height=220, key='utm_outreach_body_template')
+
+    template_action_left, template_action_right = st.columns([1, 4])
+    with template_action_left:
+        if st.button('Save Template', key='utm_outreach_save_template'):
+            if not template_name.strip():
+                st.error('Template name is required.')
+            else:
+                save_email_template(
+                    UTM_OUTREACH_DB_PATH,
+                    'UTM Adoption',
+                    template_name,
+                    subject_template,
+                    body_template,
+                )
+                st.success('Template saved to SQLite.')
+                st.rerun()
+    with template_action_right:
+        st.caption(
+            'Available placeholders: '
+            '`{market_code}`, `{market_name}`, `{status}`, `{scope_gaps}`, '
+            '`{observations}`, `{issues_identified}`, `{context}`, `{next_steps}`.'
+        )
+
+    preview_rows = []
+    manual_to_emails = st.session_state.get('utm_manual_to_emails', [])
+    manual_cc_emails = st.session_state.get('utm_manual_cc_emails', [])
+    for market_code in selected_outreach_markets:
+        matching_rows = utm_notes_df[utm_notes_df['Market Code'].astype(str) == market_code]
+        if matching_rows.empty:
+            continue
+        row = matching_rows.iloc[0]
+        market_context = _market_context_from_row(row)
+        recipient_info = resolve_market_recipients(
+            addressbook_df,
+            market_context['market_code'],
+            market_context['market_name'],
+            primary_rules,
+            cc_rules,
+        )
+        combined_to_emails = merge_unique_emails(recipient_info['to_emails'], manual_to_emails)
+        combined_cc_emails = merge_unique_emails(recipient_info['cc_emails'], manual_cc_emails)
+        existing_cc = {email.lower() for email in combined_cc_emails}
+        existing_to = {email.lower() for email in combined_to_emails}
+        for extra_email in selected_optional_cc:
+            if extra_email.lower() in existing_cc or extra_email.lower() in existing_to:
+                continue
+            combined_cc_emails.append(extra_email)
+            existing_cc.add(extra_email.lower())
+        rendered_subject = render_email_template(subject_template, market_context)
+        rendered_body = render_email_template(body_template, market_context)
+        preview_rows.append(
+            {
+                'market': market_code,
+                'market_name': market_context['market_name'],
+                'status': market_context['status'],
+                'to': '; '.join(combined_to_emails),
+                'cc': '; '.join(combined_cc_emails),
+                'subject': rendered_subject,
+                'body': rendered_body,
+                'primary_count': len(combined_to_emails),
+                'invalid_primary_count': len(combined_to_emails) != 2,
+                'to_emails': combined_to_emails,
+                'cc_emails': combined_cc_emails,
+            }
+        )
+
+    st.caption('Preview')
+    preview_df = pd.DataFrame(
+        [
+            {
+                'Market': row['market'],
+                'Market Name': row['market_name'],
+                'Status': row['status'],
+                'To': row['to'],
+                'CC': row['cc'],
+                'Subject': row['subject'],
+                'Primary Count': row['primary_count'],
+                'Ready': not row['invalid_primary_count'],
+            }
+            for row in preview_rows
+        ]
+    )
+    if preview_df.empty:
+        st.info('Select at least one market to preview outreach emails.')
+    else:
+        st.dataframe(preview_df, use_container_width=True, hide_index=True)
+        st.caption('Use `Create Outlook Drafts` first when testing. Direct send depends on desktop Outlook being open and responsive.')
+
+    action_left, action_mid, action_right = st.columns([1, 1, 1])
+    with action_left:
+        create_drafts_clicked = st.button(
+            'Create Outlook Drafts',
+            key='utm_outreach_create_drafts',
+        )
+    with action_mid:
+        send_emails_clicked = st.button(
+            'Send Emails',
+            key='utm_outreach_send_emails',
+        )
+    with action_right:
+        sync_replies_clicked = st.button(
+            'Sync Replies',
+            key='utm_outreach_sync_replies',
+        )
+
+    if create_drafts_clicked or send_emails_clicked:
+        ready_rows = preview_rows[:]
+        warning_rows = [
+            f"{row['market']} ({row['primary_count']} primary contacts)"
+            for row in preview_rows
+            if row['invalid_primary_count']
+        ]
+        if not ready_rows:
+            st.error('No markets selected for draft creation.')
+        else:
+            send_mode = 'send' if send_emails_clicked else 'draft'
+            filters_payload = {
+                'statuses': selected_outreach_statuses,
+                'markets': selected_outreach_markets,
+                'primary_rules': primary_rules,
+                'cc_rules': cc_rules,
+                'optional_cc_emails': selected_optional_cc,
+                'send_mode': send_mode,
+            }
+            run_id = create_outreach_run(
+                UTM_OUTREACH_DB_PATH,
+                'UTM Adoption',
+                run_name,
+                filters_payload,
+                selected_template_id,
+            )
+            completed_count = 0
+            failed_markets = []
+            for row in ready_rows:
+                try:
+                    outlook_result = send_or_draft_outlook_email(
+                        row['to_emails'],
+                        row['cc_emails'],
+                        row['subject'],
+                        row['body'],
+                        send_mode=send_mode,
+                    )
+                    create_outreach_message(
+                        UTM_OUTREACH_DB_PATH,
+                        run_id,
+                        row['market'],
+                        row['status'],
+                        row['to_emails'],
+                        row['cc_emails'],
+                        row['subject'],
+                        row['body'],
+                        outlook_result['sent_at'],
+                        outlook_result['entry_id'],
+                        outlook_result['conversation_id'],
+                        outlook_result['sync_state'],
+                    )
+                    completed_count += 1
+                except Exception as exc:
+                    failed_markets.append(f"{row['market']}: {exc}")
+
+            if completed_count:
+                outcome = 'sent' if send_mode == 'send' else 'drafted'
+                st.success(f'{completed_count} market emails {outcome} and tracked in SQLite.')
+            if warning_rows:
+                st.warning('These markets did not resolve to exactly 2 primary contacts and may need manual fixes in Outlook: ' + ', '.join(warning_rows))
+            if failed_markets:
+                st.error('Outlook failures: ' + ' | '.join(failed_markets))
+            st.rerun()
+
+    if sync_replies_clicked:
+        try:
+            synced_count = sync_outlook_replies(UTM_OUTREACH_DB_PATH, 'UTM Adoption')
+            st.success(f'Synced reply status for {synced_count} tracked messages.')
+            st.rerun()
+        except Exception as exc:
+            st.error(f'Reply sync failed: {exc}')
+
+    tracker_df = load_outreach_tracker_df(UTM_OUTREACH_DB_PATH, 'UTM Adoption')
+    st.caption('Tracker')
+    if tracker_df.empty:
+        st.info('No outreach messages have been tracked yet.')
+    else:
+        st.dataframe(
+            tracker_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                'market': st.column_config.TextColumn('Market', width='small'),
+                'current_utm_status': st.column_config.TextColumn('UTM Status', width='medium'),
+                'sent_at': st.column_config.TextColumn('Sent At', width='medium'),
+                'to': st.column_config.TextColumn('To', width='medium'),
+                'cc': st.column_config.TextColumn('CC', width='medium'),
+                'subject': st.column_config.TextColumn('Subject', width='large'),
+                'sync_state': st.column_config.TextColumn('Sync State', width='small'),
+                'replied': st.column_config.CheckboxColumn('Replied'),
+                'last_reply_at': st.column_config.TextColumn('Last Reply At', width='medium'),
+                'last_reply_from': st.column_config.TextColumn('Last Reply From', width='medium'),
+                'last_reply_snippet': st.column_config.TextColumn('Last Reply Snippet', width='large'),
+                'run_name': st.column_config.TextColumn('Run Name', width='medium'),
+            },
+        )
+        thread_options = {
+            f"{row['market']} | {row['subject']} | {row['sent_at']}": int(row['id'])
+            for _, row in tracker_df.iterrows()
+        }
+        selected_thread_label = st.selectbox(
+            'Thread viewer',
+            list(thread_options.keys()),
+            index=0,
+            key='utm_outreach_thread_select',
+        )
+        selected_thread_id = thread_options[selected_thread_label]
+        selected_thread_row = tracker_df[tracker_df['id'] == selected_thread_id].iloc[0]
+        thread_df = load_outreach_thread_df(UTM_OUTREACH_DB_PATH, selected_thread_id)
+
+        st.caption('Original tracked message')
+        st.markdown(
+            f"**Subject:** {selected_thread_row['subject']}\n\n"
+            f"**To:** {selected_thread_row['to']}\n\n"
+            f"**CC:** {selected_thread_row['cc']}\n\n"
+            f"**Sent At:** {selected_thread_row['sent_at']}\n\n"
+            f"**Body:**\n\n{selected_thread_row['body_rendered']}"
+        )
+
+        st.caption('Conversation items from Outlook')
+        if thread_df.empty:
+            st.info('No synced thread items yet for this tracked message.')
+        else:
+            for _, thread_row in thread_df.iterrows():
+                sender_label = thread_row['sender_name'] or thread_row['sender_email'] or 'Unknown sender'
+                with st.expander(f"{thread_row['received_at']} | {sender_label} | {thread_row['subject']}", expanded=False):
+                    st.write(f"From: {sender_label}")
+                    if thread_row['sender_email']:
+                        st.write(f"Email: {thread_row['sender_email']}")
+                    st.write(f"Received: {thread_row['received_at']}")
+                    st.write(thread_row['body_text'] or thread_row['snippet'])
+
+    st.divider()
+    st.subheader('Market Engagement')
+    st.caption('Manual workflow board for market communications. All inputs are stored in SQLite.')
+
+    engagement_df = load_market_engagement_df(UTM_OUTREACH_DB_PATH)
+    engagement_kpis = load_market_engagement_kpis(UTM_OUTREACH_DB_PATH)
+
+    kpi_col_1, kpi_col_2, kpi_col_3, kpi_col_4, kpi_col_5, kpi_col_6 = st.columns(6)
+    with kpi_col_1:
+        st.metric('Markets', engagement_kpis['total_markets'])
+    with kpi_col_2:
+        st.metric('Engaged', engagement_kpis['engaged_markets'])
+    with kpi_col_3:
+        st.metric('Touchpoints', engagement_kpis['total_touchpoints'])
+    with kpi_col_4:
+        st.metric('Blocked', engagement_kpis['blocked_markets'])
+    with kpi_col_5:
+        st.metric('Resolved', engagement_kpis['resolved_markets'])
+    with kpi_col_6:
+        st.metric('Closed', engagement_kpis['closed_markets'])
+
+    st.caption('Kanban board')
+    board_columns = st.columns(len(UTM_ENGAGEMENT_STAGES))
+    for idx, stage in enumerate(UTM_ENGAGEMENT_STAGES):
+        stage_df = engagement_df[engagement_df['Stage'] == stage]
+        with board_columns[idx]:
+            st.markdown(f"**{stage}**")
+            st.caption(f"{len(stage_df)} markets")
+            if stage_df.empty:
+                st.write('No markets')
+            else:
+                for _, stage_row in stage_df.iterrows():
+                    due_label = stage_row['Next Action Due'] or 'No due date'
+                    st.markdown(
+                        f"**{stage_row['Market Code']}**  \n"
+                        f"{stage_row['Issue Summary'] or stage_row['Market Name']}  \n"
+                        f"`{stage_row['Priority']}` | {due_label}"
+                    )
+
+    engagement_market_options = [
+        f"{row['Market Code']} | {row['Market Name']}"
+        for _, row in engagement_df.iterrows()
+    ]
+    if engagement_market_options:
+        selected_engagement_label = st.selectbox(
+            'Engagement detail',
+            engagement_market_options,
+            index=0,
+            key='utm_engagement_market_select',
+        )
+        selected_market_code = selected_engagement_label.split(' | ', 1)[0]
+        selected_engagement_row = engagement_df[engagement_df['Market Code'] == selected_market_code].iloc[0]
+
+        detail_left, detail_right = st.columns([2, 1])
+        with detail_left:
+            engagement_stage = st.selectbox(
+                'Stage',
+                UTM_ENGAGEMENT_STAGES,
+                index=UTM_ENGAGEMENT_STAGES.index(selected_engagement_row['Stage']) if selected_engagement_row['Stage'] in UTM_ENGAGEMENT_STAGES else 0,
+                key=f"utm_engagement_stage_{selected_market_code}",
+            )
+            engagement_owner = st.text_input(
+                'Owner',
+                value=selected_engagement_row['Owner'],
+                key=f"utm_engagement_owner_{selected_market_code}",
+            )
+            engagement_issue_summary = st.text_input(
+                'Issue summary',
+                value=selected_engagement_row['Issue Summary'],
+                key=f"utm_engagement_issue_summary_{selected_market_code}",
+            )
+            engagement_latest_note = st.text_area(
+                'Latest note',
+                value=selected_engagement_row['Latest Note'],
+                height=180,
+                key=f"utm_engagement_latest_note_{selected_market_code}",
+            )
+        with detail_right:
+            engagement_priority = st.selectbox(
+                'Priority',
+                UTM_ENGAGEMENT_PRIORITIES,
+                index=UTM_ENGAGEMENT_PRIORITIES.index(selected_engagement_row['Priority']) if selected_engagement_row['Priority'] in UTM_ENGAGEMENT_PRIORITIES else 1,
+                key=f"utm_engagement_priority_{selected_market_code}",
+            )
+            engagement_next_action = st.text_area(
+                'Next action',
+                value=selected_engagement_row['Next Action'],
+                height=120,
+                key=f"utm_engagement_next_action_{selected_market_code}",
+            )
+            engagement_next_action_due = st.text_input(
+                'Next action due',
+                value=selected_engagement_row['Next Action Due'],
+                key=f"utm_engagement_next_action_due_{selected_market_code}",
+                help='Free-text date or deadline, for example 2026-03-24 or Friday EOD.',
+            )
+            st.caption(f"First contact: {selected_engagement_row['First Contact At'] or 'n/a'}")
+            st.caption(f"Last contact: {selected_engagement_row['Last Contact At'] or 'n/a'}")
+            st.caption(f"Touchpoints: {selected_engagement_row['Touchpoints']}")
+
+        save_engagement_clicked = st.button('Save Engagement Update', key='utm_engagement_save')
+        if save_engagement_clicked:
+            save_market_engagement_update(
+                UTM_OUTREACH_DB_PATH,
+                selected_engagement_row['Market Code'],
+                selected_engagement_row['Market Name'],
+                engagement_stage,
+                engagement_owner,
+                engagement_priority,
+                engagement_issue_summary,
+                engagement_latest_note,
+                engagement_next_action,
+                engagement_next_action_due,
+            )
+            st.success('Engagement update saved to SQLite.')
+            st.rerun()
+
+        history_df = load_market_engagement_history_df(UTM_OUTREACH_DB_PATH, selected_engagement_row['Market Code'])
+        st.caption('Update history')
+        if history_df.empty:
+            st.info('No manual updates logged yet for this market.')
+        else:
+            st.dataframe(history_df, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader('Outreach Database')
+    st.caption('Local SQLite store for Outlook outreach state on the UTM Adoption workflow.')
+
+    db_left, db_mid, db_right = st.columns([1, 1, 3])
+    with db_left:
+        st.metric('DB Contacts', outreach_db_counts['contacts'])
+    with db_mid:
+        st.metric('Templates', outreach_db_counts['email_templates'])
+    with db_right:
+        st.caption(f'Database: `{UTM_OUTREACH_DB_PATH}`')
+        st.caption('UTM notes and address book are now served directly from SQLite on this page.')
+
+    db_stat_left, db_stat_mid, db_stat_right = st.columns([1, 1, 1])
+    with db_stat_left:
+        st.metric('Runs', outreach_db_counts['outreach_runs'])
+    with db_stat_mid:
+        st.metric('Messages', outreach_db_counts['outreach_messages'])
+    with db_stat_right:
+        st.metric('Replies', outreach_db_counts['outreach_replies'])
+
+    # -------------------------------------------------------------------------
+    # Sent Thread Viewer
+    # -------------------------------------------------------------------------
+    st.divider()
+    st.subheader('Sent Thread Viewer')
+    st.caption(
+        f'Fetches all Outlook emails whose subject contains "{UTM_THREAD_SUBJECT_KEYWORD}", '
+        'retrieves every message in those conversation threads, and stores them locally for review.'
+    )
+
+    fetch_col, _ = st.columns([1, 3])
+    with fetch_col:
+        if st.button('Fetch / Refresh Threads from Outlook', key='utm_fetch_threads_btn'):
+            with st.spinner('Connecting to Outlook and fetching threads…'):
+                try:
+                    fetched_count = fetch_and_store_utm_threads(UTM_OUTREACH_DB_PATH, UTM_THREAD_SUBJECT_KEYWORD)
+                    st.success(f'Done — {fetched_count} thread(s) stored.')
+                    st.rerun()
+                except Exception as fetch_exc:
+                    st.error(str(fetch_exc))
+
+    utm_threads_df = load_utm_threads_df(UTM_OUTREACH_DB_PATH)
+
+    if utm_threads_df.empty:
+        st.info('No threads stored yet. Click "Fetch / Refresh Threads from Outlook" above.')
+    else:
+        thread_kpi_a, thread_kpi_b, thread_kpi_c = st.columns(3)
+        with thread_kpi_a:
+            st.metric('Threads', len(utm_threads_df))
+        with thread_kpi_b:
+            st.metric('Total Messages', int(utm_threads_df['Messages'].sum()))
+        with thread_kpi_c:
+            last_fetch = utm_threads_df['Fetched At'].max()
+            st.metric('Last Fetched', last_fetch or '—')
+
+        # --- Per-market contact stats ---
+        st.markdown('**Markets contacted**')
+        contact_stats_df = load_utm_thread_contact_stats_df(UTM_OUTREACH_DB_PATH, UTM_THREAD_EXCLUDED_REPLY_EMAILS)
+        if not contact_stats_df.empty:
+            responded_count = int(contact_stats_df['Responded'].sum())
+            no_response_count = len(contact_stats_df) - responded_count
+            stat_c1, stat_c2, stat_c3 = st.columns(3)
+            with stat_c1:
+                st.metric('Contacted', len(contact_stats_df))
+            with stat_c2:
+                st.metric('Responded', responded_count)
+            with stat_c3:
+                st.metric('No Response', no_response_count)
+
+            display_df = contact_stats_df.drop(columns=['id']).copy()
+            display_df['Responded'] = display_df['Responded'].map({True: 'Yes', False: 'No'})
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    'Subject': st.column_config.TextColumn('Subject', width='medium'),
+                    'Sent At': st.column_config.TextColumn('Sent At', width='small'),
+                    'To': st.column_config.TextColumn('To', width='large'),
+                    'CC': st.column_config.TextColumn('CC', width='large'),
+                    'Responded': st.column_config.TextColumn('Responded', width='small'),
+                    'Replies': st.column_config.NumberColumn('Replies', width='small'),
+                    'Replied By': st.column_config.TextColumn('Replied By', width='large'),
+                },
+            )
+        st.divider()
+
+        st.markdown('**View thread**')
+        thread_labels = [
+            f"{row['Subject']}  |  {row['First Sent']}  |  {row['Messages']} msg(s)"
+            for _, row in utm_threads_df.iterrows()
+        ]
+        selected_thread_label = st.selectbox(
+            'Select a thread to view',
+            options=thread_labels,
+            key='utm_thread_viewer_select',
+            label_visibility='collapsed',
+        )
+
+        if selected_thread_label is not None:
+            selected_thread_idx = thread_labels.index(selected_thread_label)
+            selected_thread_id = int(utm_threads_df.iloc[selected_thread_idx]['id'])
+            selected_thread_subject = utm_threads_df.iloc[selected_thread_idx]['Subject']
+            selected_thread_participants = utm_threads_df.iloc[selected_thread_idx]['Participants']
+
+            st.markdown(f'**Subject:** {selected_thread_subject}')
+            st.caption(f'Participants: {selected_thread_participants}')
+
+            thread_messages_df = load_utm_thread_messages_df(UTM_OUTREACH_DB_PATH, selected_thread_id)
+
+            if thread_messages_df.empty:
+                st.info('No messages found for this thread.')
+            else:
+                for _, msg_row in thread_messages_df.iterrows():
+                    is_sent = msg_row['direction'] == 'sent'
+                    avatar_name = 'You' if is_sent else (msg_row['sender_name'] or msg_row['sender_email'] or 'Them')
+                    with st.chat_message(name=avatar_name):
+                        header_parts = []
+                        if msg_row['sender_name']:
+                            header_parts.append(f"**{msg_row['sender_name']}**")
+                        if msg_row['sender_email']:
+                            header_parts.append(f"`{msg_row['sender_email']}`")
+                        direction_tag = 'Sent' if is_sent else 'Reply'
+                        st.markdown(' '.join(header_parts) + f'  —  _{direction_tag}_')
+                        meta_parts = []
+                        if msg_row['timestamp']:
+                            meta_parts.append(msg_row['timestamp'])
+                        if msg_row['to_emails']:
+                            meta_parts.append(f"To: {msg_row['to_emails']}")
+                        if msg_row['cc_emails']:
+                            meta_parts.append(f"CC: {msg_row['cc_emails']}")
+                        if meta_parts:
+                            st.caption('  |  '.join(meta_parts))
+                        body = (msg_row['body_text'] or '').strip()
+                        if body:
+                            with st.expander('Message body', expanded=is_sent):
+                                st.text(body)
+                        else:
+                            st.caption('_(no body)_')
+
+    st.stop()
+
+if page == 'Taxonomy Hygiene':
+    st.subheader('Taxonomy Hygiene')
+    st.caption('Governance-focused review of PlanIT taxonomy structure, values, and conditional logic.')
+
+    if not TAXONOMY_HYGIENE_PATH.exists():
+        st.error(f'Taxonomy workbook not found: {TAXONOMY_HYGIENE_PATH}')
+        st.stop()
+
+    analysis = run_taxonomy_hygiene_analysis(str(TAXONOMY_HYGIENE_PATH))
+    taxonomy_df = load_taxonomy_hygiene_workbook(str(TAXONOMY_HYGIENE_PATH))
+    summary = analysis['executive_summary']
+
+    top1, top2, top3, top4 = st.columns(4)
+    top1.metric('Rows reviewed', f"{len(taxonomy_df):,}")
+    top2.metric('Critical dimensions', summary['critical_dimensions'])
+    top3.metric('High severity dimensions', summary['high_dimensions'])
+    top4.metric('Design-smell values', summary['design_smell_values'])
+
+    st.markdown('**Executive Summary**')
+    st.write(summary['headline'])
+    st.write(summary['practical_priority'])
+    st.info(
+        'This is a provisional governance assessment based on the workbook `Taxonomy Outputs` sheet. '
+        'It treats placeholders as invalid input by default and flags workaround-driven values as design smells.'
+    )
+
+    st.markdown('**Main Findings**')
+    findings = analysis['grouped_findings']
+    for label, frame in [
+        ('Excessive dropdown complexity', findings['excessive_dropdown_complexity']),
+        ('Irrelevant cross-channel values', findings['irrelevant_cross_channel_values']),
+        ('Bad fallback values', findings['bad_fallback_values']),
+        ('Weak validation logic', findings['weak_validation_logic']),
+        ('Future-state structural issues', findings['future_state_structural_issues']),
+    ]:
+        with st.expander(label, expanded=False):
+            if frame.empty:
+                st.write('No rows flagged in this category from the first-pass rules.')
+            else:
+                st.dataframe(frame, use_container_width=True, hide_index=True)
+
+    with st.expander('Missing dimensions', expanded=True):
+        st.dataframe(analysis['missing_dimensions'], use_container_width=True, hide_index=True)
+
+    st.markdown('**Dimension Review Table**')
+    severity_filter = st.multiselect(
+        'Severity filter',
+        options=['Critical', 'High', 'Medium', 'Low'],
+        default=['Critical', 'High', 'Medium', 'Low'],
+        key='taxonomy_severity_filter',
+    )
+    dim_df = analysis['dimension_review']
+    if severity_filter:
+        dim_df = dim_df[dim_df['Severity'].isin(severity_filter)]
+    st.dataframe(dim_df, use_container_width=True, hide_index=True)
+
+    st.markdown('**Value Review Table**')
+    dimension_options = sorted(analysis['value_review']['Dimension'].dropna().unique().tolist())
+    selected_dimension = st.selectbox('Value review dimension', dimension_options, index=0, key='taxonomy_value_dimension')
+    value_df = analysis['value_review']
+    value_df = value_df[value_df['Dimension'] == selected_dimension]
+    st.dataframe(value_df, use_container_width=True, hide_index=True)
+
+    st.markdown('**Proposed Validation Rules**')
+    st.dataframe(analysis['validation_rules'], use_container_width=True, hide_index=True)
+
+    st.markdown('**Current-State Recommendations**')
+    st.dataframe(analysis['current_state'], use_container_width=True, hide_index=True)
+
+    st.markdown('**Future-State Recommendations**')
+    st.dataframe(analysis['future_state'], use_container_width=True, hide_index=True)
+
+    st.markdown('**Stakeholder Questions / Sign-off Needs**')
+    st.dataframe(analysis['stakeholder_questions'], use_container_width=True, hide_index=True)
+
+    st.markdown('**Appendices**')
+    st.dataframe(analysis['appendix'], use_container_width=True, hide_index=True)
+
+    st.stop()
+
+if page == 'Budget Setting Sankey':
+    st.subheader('Budget Setting Sankey')
+    st.caption('Interactive budget-flow view built from the budget-setting discussion: fixed budget, explicit highlight split, and adjustable uplift / reallocation assumptions.')
+
+    default_total_budget = 123_343_635.95
+    default_base_highlight_share = 19_149_513.34 / 123_343_635.95
+
+    chart_col, control_col = st.columns([3.2, 1.2], vertical_alignment='top')
+
+    with control_col:
+        st.markdown('**Controls**')
+        total_budget = st.number_input(
+            'Total budget (EUR)',
+            min_value=1_000_000.0,
+            max_value=500_000_000.0,
+            value=float(default_total_budget),
+            step=1_000_000.0,
+            format='%.2f',
+            key='budget_sankey_total_budget',
+        )
+        base_highlight_share = st.slider(
+            'Base highlight share',
+            min_value=0.05,
+            max_value=0.40,
+            value=float(round(default_base_highlight_share, 4)),
+            step=0.005,
+            key='budget_sankey_base_highlight_share',
+        )
+        offline_upweight = st.slider(
+            'Offline upweight',
+            min_value=0.0,
+            max_value=0.50,
+            value=0.187,
+            step=0.01,
+            key='budget_sankey_offline_upweight',
+            help='Reflects the point that non-digital investment also drives sessions but is not captured in digital impression counts.',
+        )
+        nonwebsite_upweight = st.slider(
+            'Beyond-website upweight',
+            min_value=0.0,
+            max_value=0.60,
+            value=0.20,
+            step=0.01,
+            key='budget_sankey_nonwebsite_upweight',
+            help='Planning assumption to reflect sales influence beyond the OGS / website-touch path.',
+        )
+        click_credit_shift = st.slider(
+            'Highlight credit shift',
+            min_value=0.0,
+            max_value=0.30,
+            value=0.08,
+            step=0.01,
+            key='budget_sankey_click_credit_shift',
+            help='Planning assumption to reflect click / session contribution from highlight activity that otherwise burdens Always On.',
+        )
+        highlight_upper_share = st.slider(
+            'Highlight upper share',
+            min_value=0.0,
+            max_value=1.0,
+            value=0.65,
+            step=0.01,
+            key='budget_sankey_highlight_upper_share',
+            help='Explicit classification assumption. Highlight is not automatically all upper funnel.',
+        )
+        always_on_upper_share = st.slider(
+            'Always On upper share',
+            min_value=0.0,
+            max_value=1.0,
+            value=0.20,
+            step=0.01,
+            key='budget_sankey_always_on_upper_share',
+            help='Allows Always On to contain both demand support and lower-funnel harvesting rather than behaving as a single block.',
+        )
+        upper_to_awareness_share = st.slider(
+            'Upper to Awareness',
+            min_value=0.0,
+            max_value=1.0,
+            value=0.60,
+            step=0.01,
+            key='budget_sankey_upper_to_awareness_share',
+        )
+        upper_to_consideration_share = 1.0 - upper_to_awareness_share
+        lower_to_conversion_share = st.slider(
+            'Lower to Conversion',
+            min_value=0.0,
+            max_value=1.0,
+            value=0.70,
+            step=0.01,
+            key='budget_sankey_lower_to_conversion_share',
+        )
+
+    fig, sankey_metrics = build_budget_sankey_figure(
+        total_budget=total_budget,
+        base_highlight_share=base_highlight_share,
+        offline_upweight=offline_upweight,
+        nonwebsite_upweight=nonwebsite_upweight,
+        click_credit_shift=click_credit_shift,
+        highlight_upper_share=highlight_upper_share,
+        always_on_upper_share=always_on_upper_share,
+        upper_to_awareness_share=upper_to_awareness_share,
+        upper_to_consideration_share=upper_to_consideration_share,
+        lower_to_conversion_share=lower_to_conversion_share,
+    )
+
+    with chart_col:
+        st.markdown('### Budget Decision Engine')
+        st.caption('From budget envelope to full-funnel planning')
+        top_a, top_b, top_c, top_d = st.columns(4)
+        top_a.metric('Highlight share', f"{sankey_metrics['recommended_highlight_share'] * 100:.1f}%")
+        top_b.metric('Awareness', format_meur(sankey_metrics['awareness_budget']))
+        top_c.metric('Consideration', format_meur(sankey_metrics['consideration_budget']))
+        top_d.metric('Conversion', format_meur(sankey_metrics['conversion_budget']))
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown('**Assumption logic used in the diagram**')
+    st.write(
+        'The current workbook implies a base highlight share. This page turns that into a fuller decision engine by: '
+        '1) reweighting Highlight upward using the challenge levers, 2) explicitly classifying both Highlight and Always On into upper vs lower funnel, '
+        'and 3) landing the full budget into Awareness, Consideration, and Conversion / Harvesting.'
+    )
+
+    assumption_df = pd.DataFrame([
+        {
+            'Assumption': 'Base highlight share from current model',
+            'Value': f"{base_highlight_share * 100:.1f}%",
+            'Interpretation': 'Current workbook-style starting point before challenge adjustments.',
+        },
+        {
+            'Assumption': 'Offline / non-digital upweight',
+            'Value': f"{offline_upweight * 100:.1f}%",
+            'Interpretation': 'Reflects untracked non-digital contribution to session generation; 18.7% is the reference discussed.',
+        },
+        {
+            'Assumption': 'Beyond-website sales influence upweight',
+            'Value': f"{nonwebsite_upweight * 100:.1f}%",
+            'Interpretation': 'Illustrative planning factor because the current session logic is anchored too narrowly on OGS / web-touch journeys.',
+        },
+        {
+            'Assumption': 'Highlight-to-Always-On credit shift',
+            'Value': f"{click_credit_shift * 100:.1f}%",
+            'Interpretation': 'Reflects the point that highlight activity also contributes clicks / sessions that reduce lower-funnel burden.',
+        },
+        {
+            'Assumption': 'Upper-funnel share within Highlight',
+            'Value': f"{highlight_upper_share * 100:.1f}%",
+            'Interpretation': 'Explicit classification assumption because Highlight is not automatically the same as Upper Funnel.',
+        },
+        {
+            'Assumption': 'Upper-funnel share within Always On / Core',
+            'Value': f"{always_on_upper_share * 100:.1f}%",
+            'Interpretation': 'Prevents Always On from being treated as purely lower funnel and allows demand support within core activity.',
+        },
+        {
+            'Assumption': 'Upper-funnel split to Awareness',
+            'Value': f"{upper_to_awareness_share * 100:.1f}%",
+            'Interpretation': 'Remaining upper-funnel budget lands in Consideration.',
+        },
+        {
+            'Assumption': 'Lower-funnel split to Conversion / Harvesting',
+            'Value': f"{lower_to_conversion_share * 100:.1f}%",
+            'Interpretation': 'Remaining lower-funnel budget lands in Consideration.',
+        },
+    ])
+    st.dataframe(assumption_df, use_container_width=True, hide_index=True)
+
+    output_df = pd.DataFrame([
+        {'Budget Bucket': 'Always On / Core', 'EUR': sankey_metrics['always_on_budget'], 'Share %': sankey_metrics['recommended_always_on_share'] * 100},
+        {'Budget Bucket': 'Highlight Activations', 'EUR': sankey_metrics['highlight_budget'], 'Share %': sankey_metrics['recommended_highlight_share'] * 100},
+        {'Budget Bucket': 'Always On Upper', 'EUR': sankey_metrics['upper_always_on_budget'], 'Share %': (sankey_metrics['upper_always_on_budget'] / total_budget) * 100},
+        {'Budget Bucket': 'Always On Lower', 'EUR': sankey_metrics['lower_always_on_budget'], 'Share %': (sankey_metrics['lower_always_on_budget'] / total_budget) * 100},
+        {'Budget Bucket': 'Upper Funnel Highlight', 'EUR': sankey_metrics['upper_highlight_budget'], 'Share %': (sankey_metrics['upper_highlight_budget'] / total_budget) * 100},
+        {'Budget Bucket': 'Lower Funnel Highlight', 'EUR': sankey_metrics['lower_highlight_budget'], 'Share %': (sankey_metrics['lower_highlight_budget'] / total_budget) * 100},
+        {'Budget Bucket': 'Awareness', 'EUR': sankey_metrics['awareness_budget'], 'Share %': (sankey_metrics['awareness_budget'] / total_budget) * 100},
+        {'Budget Bucket': 'Consideration', 'EUR': sankey_metrics['consideration_budget'], 'Share %': (sankey_metrics['consideration_budget'] / total_budget) * 100},
+        {'Budget Bucket': 'Conversion / Harvesting', 'EUR': sankey_metrics['conversion_budget'], 'Share %': (sankey_metrics['conversion_budget'] / total_budget) * 100},
+    ])
+    st.markdown('**Numeric output**')
+    st.dataframe(output_df.style.format({'EUR': '€{:,.0f}', 'Share %': '{:.1f}%'}), use_container_width=True)
+    st.download_button(
+        'Download Sankey output (CSV)',
+        data=output_df.to_csv(index=False).encode('utf-8'),
+        file_name='budget_setting_sankey_output.csv',
+        mime='text/csv',
+        key='download_budget_setting_sankey_output',
+    )
+
+    st.warning(
+        'This view is an explicit planning model, not a claim that the workbook already calculates the split this way. '
+        'It is intended to make the budget-setting assumptions visible and challengeable in one place.'
+    )
+
     st.stop()
 
 if page == 'Incentive Model':

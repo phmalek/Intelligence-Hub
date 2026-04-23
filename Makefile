@@ -46,3 +46,6 @@ media-spend-flat:
 # Flags: --id --substring --token --fuzzy --id-min-length=4 --token-threshold=0.4 --fuzzy-threshold=0.75
 campaign-join:
 	python3 other_data/ctg_pre_01/build_campaign_performance_with_spend.py --id --substring --token --fuzzy --id-min-length 4
+
+activate-venv:
+	.\venv\Scripts\Activate.ps1
