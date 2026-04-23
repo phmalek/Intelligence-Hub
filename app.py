@@ -20,6 +20,12 @@ except Exception:
     OpenAI = None
 
 from opportunity import OPPORTUNITY_CONFIG, compute_headroom_scores
+from market_cpl_incentives import (
+    calculate_cost_kpi_adjustment,
+    parse_budget_split_input,
+    build_weighted_fee_table,
+    compute_weighted_market_percentiles,
+)
 
 try:
     import numpy as np
@@ -3107,6 +3113,39 @@ if page == 'Market CPL':
         st.warning('No data available for the selected weeks/markets.')
         st.stop()
 
+    budget_input_default = (
+        '{\n'
+        '    "PCGB": 275000,\n'
+        '    "PD": 260000,\n'
+        '    "PKO": 270000,\n'
+        '    "POF": 152000,\n'
+        '    "PIT": 145000,\n'
+        '    "TRK": 225000,\n'
+        '    "PCL": 120000,\n'
+        '    "PIB_SPA": 80000,\n'
+        '    "PNO": 70000,\n'
+        '    "PIB_POR": 80000,\n'
+        '    "PCH": 80000,\n'
+        '    "PTW": 230000,\n'
+        '    "PCA": 70000,\n'
+        '    "PPL": 70000,\n'
+        '    "PJ": 60000,\n'
+        '    "PBR": 60000,\n'
+        '    "PCNA": 245000\n'
+        '}'
+    )
+    budget_text = st.text_area(
+        'Market budget split dictionary',
+        value=st.session_state.get('market_cpl_budget_text', budget_input_default),
+        height=220,
+        key='market_cpl_budget_text',
+    )
+    try:
+        budget_df = parse_budget_split_input(budget_text)
+    except ValueError as exc:
+        st.warning(str(exc))
+        budget_df = pd.DataFrame(columns=['Market', 'budget_amount', 'budget_share'])
+
     if cadence == 1:
         weekly_base = kpi_df.copy()
     else:
@@ -3172,6 +3211,7 @@ if page == 'Market CPL':
             .reset_index()
         )
         weekly_base['calendar_week'] = weekly_base['cadence_bin'].apply(lambda b: f'bin_{b}')
+    market_points_base = weekly_base.copy()
     points_base = weekly_base.copy()
     if include_all_channels and 'Channel' in points_base.columns:
         points_base = points_base.copy()
@@ -3183,38 +3223,50 @@ if page == 'Market CPL':
     def safe_ratio(num, denom):
         return num / denom if denom else None
 
-    if kpi_choice == 'Media Invest':
-        points_base['kpi_value'] = points_base['Media Spend']
-    elif kpi_choice == 'Visits (Sessions)':
-        points_base['kpi_value'] = points_base['Number of Sessions']
-    elif kpi_choice == 'Dealer Contract Form Submissions':
-        points_base['kpi_value'] = points_base['Forms Submission Started']
-    elif kpi_choice == 'DCFS':
-        points_base['kpi_value'] = points_base['DCFS']
-    elif kpi_choice == 'Sessions to DCFS Conversion Rate':
-        points_base['kpi_value'] = points_base.apply(
-            lambda r: safe_ratio(r['DCFS'], r['Number of Sessions']), axis=1
-        )
-    elif kpi_choice == 'Cost per Lead (Forms Submission Started)':
-        points_base['kpi_value'] = points_base.apply(
-            lambda r: safe_ratio(r['Media Spend'], r['Forms Submission Started']), axis=1
-        )
-    elif kpi_choice == 'Cost per Lead (DCFS)':
-        points_base['kpi_value'] = points_base.apply(
-            lambda r: safe_ratio(r['Media Spend'], r['DCFS']), axis=1
-        )
-    else:
-        weekly_cpl_forms = points_base.copy()
+    def _apply_market_cpl_kpi(frame):
+        frame = frame.copy()
+        if kpi_choice == 'Media Invest':
+            frame['kpi_value'] = frame['Media Spend']
+            return frame
+        if kpi_choice == 'Visits (Sessions)':
+            frame['kpi_value'] = frame['Number of Sessions']
+            return frame
+        if kpi_choice == 'Dealer Contract Form Submissions':
+            frame['kpi_value'] = frame['Forms Submission Started']
+            return frame
+        if kpi_choice == 'DCFS':
+            frame['kpi_value'] = frame['DCFS']
+            return frame
+        if kpi_choice == 'Sessions to DCFS Conversion Rate':
+            frame['kpi_value'] = frame.apply(
+                lambda r: safe_ratio(r['DCFS'], r['Number of Sessions']), axis=1
+            )
+            return frame
+        if kpi_choice == 'Cost per Lead (Forms Submission Started)':
+            frame['kpi_value'] = frame.apply(
+                lambda r: safe_ratio(r['Media Spend'], r['Forms Submission Started']), axis=1
+            )
+            return frame
+        if kpi_choice == 'Cost per Lead (DCFS)':
+            frame['kpi_value'] = frame.apply(
+                lambda r: safe_ratio(r['Media Spend'], r['DCFS']), axis=1
+            )
+            return frame
+
+        weekly_cpl_forms = frame.copy()
         weekly_cpl_forms['kpi'] = 'CPL (Forms Submission Started)'
         weekly_cpl_forms['kpi_value'] = weekly_cpl_forms.apply(
             lambda r: safe_ratio(r['Media Spend'], r['Forms Submission Started']), axis=1
         )
-        weekly_cpl_dcfs = points_base.copy()
+        weekly_cpl_dcfs = frame.copy()
         weekly_cpl_dcfs['kpi'] = 'CPL (DCFS)'
         weekly_cpl_dcfs['kpi_value'] = weekly_cpl_dcfs.apply(
             lambda r: safe_ratio(r['Media Spend'], r['DCFS']), axis=1
         )
-        points_base = pd.concat([weekly_cpl_forms, weekly_cpl_dcfs], ignore_index=True)
+        return pd.concat([weekly_cpl_forms, weekly_cpl_dcfs], ignore_index=True)
+
+    market_points_base = _apply_market_cpl_kpi(market_points_base)
+    points_base = _apply_market_cpl_kpi(points_base)
 
     x_dim = 'Market'
     if 'Channel' in points_base.columns and not include_all_channels and not include_all_markets:
@@ -3238,12 +3290,26 @@ if page == 'Market CPL':
     points_base['week'] = points_base['calendar_week']
     points_base['week'] = points_base['week'].fillna('Unknown').astype(str)
 
+    weighted_percentiles = {}
+    budget_selection_df = budget_df.copy()
+    if not budget_selection_df.empty and 'Market' in market_points_base.columns:
+        selected_budget_markets = sorted(market_points_base['Market'].dropna().astype(str).unique().tolist())
+        budget_selection_df['Market'] = budget_selection_df['Market'].astype(str)
+        budget_selection_df = budget_selection_df[budget_selection_df['Market'].isin(selected_budget_markets)].copy()
+        if not budget_selection_df.empty:
+            weighted_percentiles = compute_weighted_market_percentiles(
+                market_points_base,
+                budget_selection_df,
+                [0.50, 0.67, 0.90, 0.95, 0.97, 0.99],
+            )
+
     pct97 = (
         points_base.groupby([x_dim], dropna=False)['kpi_value']
         .quantile(0.97)
         .max()
     )
-    benchmark_default = float(pct97) if pct97 is not None and not pd.isna(pct97) else 0.0
+    raw_benchmark_default = float(pct97) if pct97 is not None and not pd.isna(pct97) else 0.0
+    benchmark_default = weighted_percentiles.get(0.97, raw_benchmark_default)
     filter_signature = {
         'campaign': campaign,
         'weeks': tuple(sorted(selected_weeks)) if selected_weeks else (),
@@ -3253,6 +3319,7 @@ if page == 'Market CPL':
         'all_channels': include_all_channels,
         'cadence': cadence,
         'kpi_choice': kpi_choice,
+        'budget_text': budget_text.strip(),
     }
     if st.session_state.get('market_cpl_filter_signature') != filter_signature:
         st.session_state['market_cpl_benchmark'] = benchmark_default
@@ -3265,6 +3332,15 @@ if page == 'Market CPL':
         min_value=0.0,
         step=1.0,
     )
+    if weighted_percentiles:
+        weighted_pct_df = pd.DataFrame(
+            [
+                {'Percentile': f'P{int(round(p * 100))}', 'Weighted benchmark': value}
+                for p, value in sorted(weighted_percentiles.items())
+            ]
+        )
+        st.caption('Budget-weighted market percentiles')
+        st.dataframe(weighted_pct_df, use_container_width=True, hide_index=True)
 
     st.subheader('Average + volatility (box plot)')
     show_points = st.checkbox('Show individual points', value=True, key='market_cpl_show_points')
@@ -3466,6 +3542,75 @@ if page == 'Market CPL':
                     unsafe_allow_html=True,
                 )
 
+            st.subheader('Weighted planning scenario')
+            with st.popover('What is this?'):
+                st.write(
+                    'Use a forecast CPL and a market budget dictionary to estimate next-year '
+                    'incentive impact weighted by planned market budget rather than by historical point counts.'
+                )
+            if kpi_choice not in {
+                'Cost per Lead (Forms Submission Started)',
+                'Cost per Lead (DCFS)',
+            }:
+                st.info('Weighted planning is available for single cost-per-lead KPI views.')
+            else:
+                forecast_cpl = st.number_input(
+                    'Forecast CPL for next year',
+                    min_value=0.0,
+                    value=float(benchmark_value),
+                    step=1.0,
+                    key='market_cpl_forecast_cpl',
+                )
+                scenario_markets = sorted(kpi_df['Market'].dropna().astype(str).unique().tolist())
+                if not budget_df.empty:
+                    budget_df['Market'] = budget_df['Market'].astype(str)
+                    filtered_budget_df = budget_df[budget_df['Market'].isin(scenario_markets)].copy()
+                    missing_budget_markets = [m for m in scenario_markets if m not in set(filtered_budget_df['Market'])]
+                    extra_budget_markets = [m for m in budget_df['Market'].tolist() if m not in scenario_markets]
+
+                    if missing_budget_markets:
+                        st.warning(f'Missing budget entries for selected markets: {", ".join(missing_budget_markets)}')
+                    if extra_budget_markets:
+                        st.caption(f'Ignored budget entries outside current selection: {", ".join(extra_budget_markets)}')
+
+                    if not filtered_budget_df.empty:
+                        filtered_budget_df['budget_share'] = (
+                            filtered_budget_df['budget_amount'] / filtered_budget_df['budget_amount'].sum()
+                        )
+                        weighted_fee_df, weighted_summary = build_weighted_fee_table(
+                            filtered_budget_df,
+                            forecast_cpl,
+                            benchmark_value,
+                            bah_fee,
+                            fte_fee,
+                        )
+                        forecast_adjustment = weighted_summary.get('weighted_adjustment')
+                        summary_cols = st.columns(4)
+                        summary_cols[0].metric('Forecast adjustment', f'{forecast_adjustment * 100:.1f}%')
+                        summary_cols[1].metric('Budget covered', f"{weighted_summary.get('total_budget', 0.0):,.0f}")
+                        summary_cols[2].metric('BAH adjustment', f"{weighted_summary.get('bah_adjustment_total', 0.0):,.2f}")
+                        summary_cols[3].metric('Final fee', f"{weighted_summary.get('final_fee_total', 0.0):,.2f}")
+
+                        display_weighted_df = weighted_fee_df.copy()
+                        display_weighted_df['budget_share_pct'] = display_weighted_df['budget_share'] * 100
+                        display_weighted_df['adjustment_pct'] = display_weighted_df['adjustment'] * 100
+                        display_weighted_df = display_weighted_df[
+                            [
+                                'Market',
+                                'budget_amount',
+                                'budget_share_pct',
+                                'forecast_kpi',
+                                'benchmark_kpi',
+                                'adjustment_pct',
+                                'bah_adjustment',
+                                'fte_adjustment',
+                                'final_fee',
+                            ]
+                        ].sort_values('budget_amount', ascending=False)
+                        st.dataframe(display_weighted_df, use_container_width=True)
+                    else:
+                        st.info('No overlapping markets between the current filter selection and the budget dictionary.')
+
             st.caption('Narrative benchmark cases')
             p1, p2, p3, p4, p5 = st.columns(5)
             with p1:
@@ -3480,6 +3625,9 @@ if page == 'Market CPL':
                 use_p50 = st.checkbox('P50', value=False, key='market_cpl_narr_p50')
 
             def _benchmark_for_percentile(p):
+                weighted_value = weighted_percentiles.get(p)
+                if weighted_value is not None:
+                    return float(weighted_value)
                 value = (
                     points_base.groupby([x_dim], dropna=False)['kpi_value']
                     .quantile(p)
