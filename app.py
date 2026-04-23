@@ -2822,7 +2822,6 @@ with st.sidebar:
             'CTG Pre/Post KPI per Session',
             'CTG Pre/Post KPI per Session (Copy)',
         ],
-        horizontal=True,
     )
     if page == 'Overview':
         st.header('Plot Filters')
