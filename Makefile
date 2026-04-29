@@ -1,8 +1,15 @@
 IMAGE_NAME ?= intelligence-hub
 PORT ?= 8501
 ENV_FILE ?= .env
+MARKET ?= all
+FOLDER ?= market_forms
+RESPONSES ?= market_forms
+OUTFILE ?= utm_consolidated.xlsx
+ADDRESSBOOK ?= UTM_data/PHD_Local_Market_Addressbook.csv
+DEADLINE ?= Friday, 09 May 2026
+CC ?=
 
-.PHONY: docker-build docker-run docker-run-mount docker-clean report-pdf media-spend-flat campaign-join
+.PHONY: docker-build docker-run docker-run-mount docker-clean report-pdf media-spend-flat campaign-join utm-forms utm-consolidate utm-email-drafts cluster-analysis cluster-slide cluster-all
 
 # Build Docker image
 
@@ -49,3 +56,33 @@ campaign-join:
 
 activate-venv:
 	.\venv\Scripts\Activate.ps1
+
+# Generate structured UTM response forms per market
+# Usage:
+#   make utm-forms MARKET=all FOLDER=market_forms_apr
+#   make utm-forms MARKET=PCGB FOLDER=market_forms_pcgb
+utm-forms:
+	./UTM_data/run_utm_market_forms.sh generate "$(MARKET)" "$(FOLDER)"
+
+# Consolidate completed market forms into one workbook
+# Usage:
+#   make utm-consolidate RESPONSES=market_forms_apr OUTFILE=utm_consolidated_apr.xlsx
+utm-consolidate:
+	./UTM_data/run_utm_market_forms.sh consolidate "$(RESPONSES)" "$(OUTFILE)"
+
+# Build .eml drafts per market form in folder
+# Usage:
+#   make utm-email-drafts FOLDER=market_forms_apr ADDRESSBOOK=UTM_data/PHD_Local_Market_Addressbook.csv DEADLINE="Friday, 09 May 2026" CC="a@x.com;b@y.com"
+utm-email-drafts:
+	./.venv/bin/python UTM_data/build_market_email_drafts.py --forms-folder "UTM_data/$(FOLDER)" --addressbook-csv "$(ADDRESSBOOK)" --deadline "$(DEADLINE)" --cc "$(CC)"
+
+# Run market clustering analysis using reverse-funnel targets
+cluster-analysis:
+	./.venv/bin/python budget_setting/run_market_cluster_analysis.py
+
+# Build market cluster recommendation slide (.pptx) from latest outputs
+cluster-slide:
+	./.venv/bin/python budget_setting/build_market_cluster_slide.py
+
+# Run full pipeline: analysis outputs + slide
+cluster-all: cluster-analysis cluster-slide

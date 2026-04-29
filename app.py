@@ -2810,6 +2810,25 @@ def compute_dynamic_s50(df_in):
     return s50_map
 
 
+def _apply_risk_filters(df_in, markets=None, channel='All', model='All', campaign='All'):
+    filtered = df_in.copy()
+    if markets and 'All' not in markets and 'Market' in filtered.columns:
+        filtered = filtered[filtered['Market'].isin(markets)]
+    if channel != 'All' and 'Channel' in filtered.columns:
+        filtered = filtered[filtered['Channel'] == channel]
+    if model != 'All' and 'Model' in filtered.columns:
+        filtered = filtered[filtered['Model'] == model]
+    if campaign != 'All' and 'Campaign' in filtered.columns:
+        filtered = filtered[filtered['Campaign'] == campaign]
+    return filtered
+
+
+def _risk_stage_header(title: str, description: str = ''):
+    st.subheader(title)
+    if description:
+        st.caption(description)
+
+
 with st.sidebar:
     page = st.radio(
         'Page',
@@ -3139,6 +3158,9 @@ with st.sidebar:
 
 if page == 'Risk Analysis':
     st.subheader('Risk Analysis')
+    st.caption(
+        'Planner workflow: 1) Scope and thresholds  2) Score opportunity  3) Run allocation  4) Compare outcomes  5) Export.'
+    )
     with st.popover('What is this?'):
         st.write(
             'This page scores markets/channels/models for opportunity and risk using recent '
@@ -3150,10 +3172,13 @@ if page == 'Risk Analysis':
             '1. Set thresholds in the left panel (or keep defaults).\n'
             '2. Filter by Market/Channel/Model if you want a narrower view.\n'
             '3. Review each step section to see how the score is built.\n'
-            '4. Use the LLM report for a plain‑language summary.'
+            '4. Run allocation and use the planner summary to choose a final split.'
         )
 
-    st.subheader('Efficiency headroom')
+    _risk_stage_header(
+        'Stage 1 - Data scope and efficiency headroom',
+        'Set thresholds and scope in the sidebar, then review how efficient each group is versus its benchmark.',
+    )
     config_override = dict(OPPORTUNITY_CONFIG)
     config_override['headroom_high'] = float(headroom_high_input)
     config_override['recent_cpl_periods'] = int(recent_periods_input)
@@ -3161,15 +3186,13 @@ if page == 'Risk Analysis':
     config_override['recent_curve_periods'] = int(recent_periods_input)
     config_override['growth_ratio_max'] = float(growth_ratio_max_input)
     config_override['mid_ratio_max'] = float(mid_ratio_max_input)
-    df_input = df.copy()
-    if opp_markets and 'All' not in opp_markets:
-        df_input = df_input[df_input['Market'].isin(opp_markets)]
-    if opp_channel != 'All':
-        df_input = df_input[df_input['Channel'] == opp_channel]
-    if opp_model != 'All':
-        df_input = df_input[df_input['Model'] == opp_model]
-    if opp_campaign != 'All':
-        df_input = df_input[df_input['Campaign'] == opp_campaign]
+    df_input = _apply_risk_filters(
+        df,
+        markets=opp_markets,
+        channel=opp_channel,
+        model=opp_model,
+        campaign=opp_campaign,
+    )
 
     if np is None or curve_fit is None:
         st.info('Install scipy to enable dynamic s50 curve fitting.')
@@ -3192,12 +3215,25 @@ if page == 'Risk Analysis':
         st.warning('No data available to compute headroom.')
         st.stop()
 
-    st.subheader('LLM report')
-    st.caption('LLM insights (wireframe)')
-    if st.button('Generate LLM Report (Markdown)'):
-        st.info('Coming soon...')
+    eligible_rows = int(results['gate_passed'].fillna(False).sum()) if 'gate_passed' in results.columns else 0
+    total_rows = int(len(results))
+    top_group_text = 'n/a'
+    if 'opportunity_score' in results.columns:
+        _top_candidates = results.dropna(subset=['opportunity_score'])
+        if not _top_candidates.empty:
+            _top = _top_candidates.sort_values('opportunity_score', ascending=False).iloc[0]
+            top_group_text = f"{_top.get('Market', 'n/a')} | {_top.get('Channel', 'n/a')} | {_top.get('Model', 'n/a')}"
+    st.subheader('Planner run snapshot')
+    m1, m2, m3 = st.columns(3)
+    m1.metric('Groups scored', f'{total_rows:,}')
+    m2.metric('Groups passing gates', f'{eligible_rows:,}')
+    m3.metric('Top opportunity group', top_group_text)
 
-    st.subheader('Headroom process (selected group)')
+    _risk_stage_header(
+        'Stage 2 - Opportunity scoring drilldown',
+        'Inspect headroom, scale, predictability, and final opportunity score before allocating budget.',
+    )
+    st.markdown('**Headroom process (selected group)**')
     with st.popover('What is this?'):
         st.write(
             'Shows how headroom is derived for one Market/Channel/Model: '
@@ -3382,8 +3418,14 @@ if page == 'Risk Analysis':
                 summary = summary.replace('[BOTTOM_HEADROOM]', f"{float(bottom_row['headroom_pct']):.1f}")
                 summary = summary.replace('[TAKEAWAY]', 'headroom is concentrated in the leading groups')
                 st.text_area('Headroom summary (copy for report)', summary, height=140)
-            if st.button('Generate headroom report', key='headroom_report'):
-                st.info('Coming soon...')
+            if not plot_df.empty:
+                ordered = plot_df.sort_values('headroom_pct', ascending=False)
+                top_row = ordered.iloc[0]
+                bottom_row = ordered.iloc[-1]
+                st.caption(
+                    f"Headroom signal: {top_row['group']} leads at {float(top_row['headroom_pct']):.1f}% while "
+                    f"{bottom_row['group']} is lowest at {float(bottom_row['headroom_pct']):.1f}%."
+                )
 
         st.subheader('Scale')
         with st.popover('What is this?'):
@@ -3422,22 +3464,28 @@ if page == 'Risk Analysis':
             )
             fig.update_yaxes(title_text='Scale score (0–100)', range=[0, 110])
             st.plotly_chart(fig, use_container_width=True)
-            if st.button('Generate scale report', key='scale_report'):
-                st.info('Coming soon...')
+            _top_scale = scale_df.sort_values('scale_score', ascending=False).iloc[0]
+            st.caption(
+                f"Scale signal: {str(_top_scale['group'])} has the highest scale score "
+                f"({float(_top_scale['scale_score']):.0f}/100)."
+            )
 
-        st.subheader('Media response curve')
+        _risk_stage_header(
+            'Stage 3 - Curve fit and allocation setup',
+            'Configure allocation controls, run scenarios, and compare expected DCFS under different constraints.',
+        )
         with st.popover('What is this?'):
             st.write(
                 'Plots Media Spend vs. DCFS to visualize response curves and fitted saturation trends. '
                 'Used to infer growth vs. saturation.'
             )
-        curve_data = df.copy()
-        if opp_markets and 'All' not in opp_markets:
-            curve_data = curve_data[curve_data['Market'].isin(opp_markets)]
-        if opp_channel != 'All':
-            curve_data = curve_data[curve_data['Channel'] == opp_channel]
-        if opp_model != 'All':
-            curve_data = curve_data[curve_data['Model'] == opp_model]
+        curve_data = _apply_risk_filters(
+            df,
+            markets=opp_markets,
+            channel=opp_channel,
+            model=opp_model,
+            campaign='All',
+        )
         curve_data['Media Spend'] = pd.to_numeric(curve_data['Media Spend'], errors='coerce')
         curve_data['DCFS'] = pd.to_numeric(curve_data['DCFS'], errors='coerce')
         curve_data = curve_data[(curve_data['Media Spend'] > 0) & (curve_data['DCFS'] >= 0)]
@@ -3517,71 +3565,82 @@ if page == 'Risk Analysis':
                         value=True,
                         key='use_min_constraints',
                     )
-                    use_headroom_weighting = st.checkbox(
-                        'Weight by headroom',
-                        value=False,
-                        key='use_headroom_weighting',
-                    )
-                    headroom_lambda = st.slider(
-                        'Headroom strength',
-                        min_value=0.0,
-                        max_value=1.0,
-                        value=1.0,
-                        step=0.05,
-                        disabled=not use_headroom_weighting,
-                    )
-                    if not use_headroom_weighting:
-                        headroom_lambda = 0.0
-                    use_scale_weighting = st.checkbox(
-                        'Weight by scale',
-                        value=False,
-                        key='use_scale_weighting',
-                    )
-                    scale_lambda = st.slider(
-                        'Scale strength',
-                        min_value=0.0,
-                        max_value=1.0,
-                        value=1.0,
-                        step=0.05,
-                        disabled=not use_scale_weighting,
-                    )
-                    if not use_scale_weighting:
-                        scale_lambda = 0.0
-                    use_spend_weighting = st.checkbox(
-                        'Use spend curve',
-                        value=True,
-                        key='use_spend_weighting',
-                    )
-                    constraint_strength = st.slider(
-                        'Constraint strength',
-                        min_value=0.0,
-                        max_value=1.0,
-                        value=0.0,
-                        step=0.05,
-                        disabled=not use_spend_weighting,
-                    )
-                    if not use_spend_weighting:
-                        constraint_strength = 0.0
-                    reverse_funnel_blend = st.slider(
-                        'Reverse funnel blend',
-                        min_value=0.0,
-                        max_value=1.0,
-                        value=0.0,
-                        step=0.05,
-                        help='0 = use risk-aware allocation only, 1 = use reverse-funnel allocation only.',
-                    )
-                    reverse_funnel_paste = st.text_area(
-                        'Paste reverse funnel % split (Market <tab> %)',
-                        value='',
-                        placeholder='Market\t% Split\nPCGB\t22.5%\nPD\t18.8%\n...',
-                        help='Paste a two-column list. Example: "PCGB<TAB>22.5%".',
-                    )
-                    hierarchical_market_channel = st.checkbox(
-                        'Allocate market first, then split within each market by channel',
-                        value=False,
-                        key='hierarchical_market_channel',
-                        help='Runs the market allocation first, then allocates each market budget across its channels.',
-                    )
+                    use_headroom_weighting = False
+                    headroom_lambda = 0.0
+                    use_scale_weighting = False
+                    scale_lambda = 0.0
+                    use_spend_weighting = True
+                    constraint_strength = 0.0
+                    reverse_funnel_blend = 0.0
+                    reverse_funnel_paste = ''
+                    hierarchical_market_channel = False
+
+                    with st.expander('Advanced allocation settings', expanded=False):
+                        use_headroom_weighting = st.checkbox(
+                            'Weight by headroom',
+                            value=False,
+                            key='use_headroom_weighting',
+                        )
+                        headroom_lambda = st.slider(
+                            'Headroom strength',
+                            min_value=0.0,
+                            max_value=1.0,
+                            value=1.0,
+                            step=0.05,
+                            disabled=not use_headroom_weighting,
+                        )
+                        if not use_headroom_weighting:
+                            headroom_lambda = 0.0
+                        use_scale_weighting = st.checkbox(
+                            'Weight by scale',
+                            value=False,
+                            key='use_scale_weighting',
+                        )
+                        scale_lambda = st.slider(
+                            'Scale strength',
+                            min_value=0.0,
+                            max_value=1.0,
+                            value=1.0,
+                            step=0.05,
+                            disabled=not use_scale_weighting,
+                        )
+                        if not use_scale_weighting:
+                            scale_lambda = 0.0
+                        use_spend_weighting = st.checkbox(
+                            'Use spend curve',
+                            value=True,
+                            key='use_spend_weighting',
+                        )
+                        constraint_strength = st.slider(
+                            'Constraint strength',
+                            min_value=0.0,
+                            max_value=1.0,
+                            value=0.0,
+                            step=0.05,
+                            disabled=not use_spend_weighting,
+                        )
+                        if not use_spend_weighting:
+                            constraint_strength = 0.0
+                        reverse_funnel_blend = st.slider(
+                            'Reverse funnel blend',
+                            min_value=0.0,
+                            max_value=1.0,
+                            value=0.0,
+                            step=0.05,
+                            help='0 = use risk-aware allocation only, 1 = use reverse-funnel allocation only.',
+                        )
+                        reverse_funnel_paste = st.text_area(
+                            'Paste reverse funnel % split (Market <tab> %)',
+                            value='',
+                            placeholder='Market\t% Split\nPCGB\t22.5%\nPD\t18.8%\n...',
+                            help='Paste a two-column list. Example: "PCGB<TAB>22.5%".',
+                        )
+                        hierarchical_market_channel = st.checkbox(
+                            'Allocate market first, then split within each market by channel',
+                            value=False,
+                            key='hierarchical_market_channel',
+                            help='Runs the market allocation first, then allocates each market budget across its channels.',
+                        )
 
                     def _norm_label(label: str) -> str:
                         return ''.join(ch for ch in str(label).lower() if ch.isalnum())
@@ -3618,126 +3677,127 @@ if page == 'Risk Analysis':
                             if key in parsed_reverse:
                                 reverse_overrides[g] = parsed_reverse[key]
 
-                    st.subheader('Target DCFS to required spend (linear)')
-                    if not time_col:
-                        st.info('No time column available for weekly CPL selection.')
-                    else:
-                        week_values = (
-                            curve_data[time_col]
-                            .dropna()
-                            .astype(str)
-                            .unique()
-                            .tolist()
-                        )
-                        week_values = sorted(week_values)
-                        week_options = ['All'] + week_values
-                        selected_weeks = st.multiselect(
-                            'Weeks to average CPL',
-                            week_options,
-                            default=['All'],
-                            key='required_spend_weeks',
-                        )
-                        if 'All' in selected_weeks or not selected_weeks:
-                            selected_weeks = week_values
-                        if not selected_weeks:
-                            st.info('Select at least one week to compute CPL averages.')
+                    with st.expander('Required spend helper (optional)', expanded=False):
+                        st.subheader('Target DCFS to required spend (linear)')
+                        if not time_col:
+                            st.info('No time column available for weekly CPL selection.')
                         else:
-                            weekly = (
-                                curve_data.groupby([time_col, group_by], dropna=False)
-                                .agg({'Media Spend': 'sum', 'DCFS': 'sum'})
-                                .reset_index()
+                            week_values = (
+                                curve_data[time_col]
+                                .dropna()
+                                .astype(str)
+                                .unique()
+                                .tolist()
                             )
-                            weekly = weekly[weekly[time_col].astype(str).isin(selected_weeks)]
-                            weekly['cpl'] = weekly.apply(
-                                lambda r: (r['Media Spend'] / r['DCFS']) if r['DCFS'] and r['DCFS'] > 0 else None,
-                                axis=1,
+                            week_values = sorted(week_values)
+                            week_options = ['All'] + week_values
+                            selected_weeks = st.multiselect(
+                                'Weeks to average CPL',
+                                week_options,
+                                default=['All'],
+                                key='required_spend_weeks',
                             )
-                            avg_cpl = (
-                                weekly.groupby(group_by, dropna=False)['cpl']
-                                .mean()
-                                .to_dict()
-                            )
-                            global_target_dcfs = st.number_input(
-                                'Global target DCFS (apply to all markets)',
-                                min_value=0.0,
-                                value=0.0,
-                                step=1.0,
-                                format='%.2f',
-                                key='global_target_dcfs',
-                            )
-                            targets_df = pd.DataFrame({
-                                'group': list(fit_params.keys()),
-                                'avg_cpl_selected_weeks': [avg_cpl.get(g, None) for g in fit_params.keys()],
-                                'target_dcfs': [global_target_dcfs] * len(fit_params),
-                            })
-                            targets_df = st.data_editor(
-                                targets_df,
-                                use_container_width=True,
-                                num_rows='fixed',
-                                key='target_dcfs_by_group',
-                            )
-                            targets_df['required_spend'] = targets_df.apply(
-                                lambda r: (r['avg_cpl_selected_weeks'] * r['target_dcfs'])
-                                if r['avg_cpl_selected_weeks'] is not None
-                                and pd.notna(r['avg_cpl_selected_weeks'])
-                                else None,
-                                axis=1,
-                            )
-                            def _invert_curve(target_y: float, params):
-                                if target_y is None or pd.isna(target_y):
-                                    return None
-                                a, b = params
-                                if a <= 0 or b <= 0:
-                                    return None
-                                if target_y <= 0:
-                                    return 0.0
-                                if target_y >= a:
-                                    return None
-                                return (b * target_y) / (a - target_y)
-
-                            targets_df['required_spend_curve'] = targets_df.apply(
-                                lambda r: _invert_curve(
-                                    r['target_dcfs'],
-                                    fit_params.get(r['group'], (None, None)),
-                                ),
-                                axis=1,
-                            )
-                            st.dataframe(
-                                targets_df.sort_values('required_spend', ascending=False, na_position='last'),
-                                use_container_width=True,
-                            )
-                            plot_df_req = targets_df.dropna(subset=['required_spend'])
-                            if not plot_df_req.empty:
-                                plot_melt = plot_df_req[['group', 'required_spend', 'required_spend_curve']].copy()
-                                plot_melt = plot_melt.melt(
-                                    id_vars=['group'],
-                                    value_vars=['required_spend', 'required_spend_curve'],
-                                    var_name='method',
-                                    value_name='required_spend_value',
+                            if 'All' in selected_weeks or not selected_weeks:
+                                selected_weeks = week_values
+                            if not selected_weeks:
+                                st.info('Select at least one week to compute CPL averages.')
+                            else:
+                                weekly = (
+                                    curve_data.groupby([time_col, group_by], dropna=False)
+                                    .agg({'Media Spend': 'sum', 'DCFS': 'sum'})
+                                    .reset_index()
                                 )
-                                plot_melt['method'] = plot_melt['method'].map({
-                                    'required_spend': 'Linear (avg CPL)',
-                                    'required_spend_curve': 'Curve-based',
+                                weekly = weekly[weekly[time_col].astype(str).isin(selected_weeks)]
+                                weekly['cpl'] = weekly.apply(
+                                    lambda r: (r['Media Spend'] / r['DCFS']) if r['DCFS'] and r['DCFS'] > 0 else None,
+                                    axis=1,
+                                )
+                                avg_cpl = (
+                                    weekly.groupby(group_by, dropna=False)['cpl']
+                                    .mean()
+                                    .to_dict()
+                                )
+                                global_target_dcfs = st.number_input(
+                                    'Global target DCFS (apply to all markets)',
+                                    min_value=0.0,
+                                    value=0.0,
+                                    step=1.0,
+                                    format='%.2f',
+                                    key='global_target_dcfs',
+                                )
+                                targets_df = pd.DataFrame({
+                                    'group': list(fit_params.keys()),
+                                    'avg_cpl_selected_weeks': [avg_cpl.get(g, None) for g in fit_params.keys()],
+                                    'target_dcfs': [global_target_dcfs] * len(fit_params),
                                 })
-                                req_fig = px.bar(
-                                    plot_melt,
-                                    x='group',
-                                    y='required_spend_value',
-                                    color='method',
-                                    barmode='group',
-                                    title='Required spend for target DCFS (linear vs curve-based)',
+                                targets_df = st.data_editor(
+                                    targets_df,
+                                    use_container_width=True,
+                                    num_rows='fixed',
+                                    key='target_dcfs_by_group',
                                 )
-                                req_fig.update_layout(
-                                    xaxis_title=group_by or 'Group',
-                                    yaxis_title='Required spend',
-                                    legend_title_text='Method',
+                                targets_df['required_spend'] = targets_df.apply(
+                                    lambda r: (r['avg_cpl_selected_weeks'] * r['target_dcfs'])
+                                    if r['avg_cpl_selected_weeks'] is not None
+                                    and pd.notna(r['avg_cpl_selected_weeks'])
+                                    else None,
+                                    axis=1,
                                 )
-                                st.plotly_chart(req_fig, use_container_width=True)
-                            required_spend_map = {
-                                str(row['group']): float(row['required_spend'])
-                                for _, row in targets_df.dropna(subset=['required_spend']).iterrows()
-                            }
-                            st.session_state['required_spend_map'] = required_spend_map
+                                def _invert_curve(target_y: float, params):
+                                    if target_y is None or pd.isna(target_y):
+                                        return None
+                                    a, b = params
+                                    if a <= 0 or b <= 0:
+                                        return None
+                                    if target_y <= 0:
+                                        return 0.0
+                                    if target_y >= a:
+                                        return None
+                                    return (b * target_y) / (a - target_y)
+
+                                targets_df['required_spend_curve'] = targets_df.apply(
+                                    lambda r: _invert_curve(
+                                        r['target_dcfs'],
+                                        fit_params.get(r['group'], (None, None)),
+                                    ),
+                                    axis=1,
+                                )
+                                st.dataframe(
+                                    targets_df.sort_values('required_spend', ascending=False, na_position='last'),
+                                    use_container_width=True,
+                                )
+                                plot_df_req = targets_df.dropna(subset=['required_spend'])
+                                if not plot_df_req.empty:
+                                    plot_melt = plot_df_req[['group', 'required_spend', 'required_spend_curve']].copy()
+                                    plot_melt = plot_melt.melt(
+                                        id_vars=['group'],
+                                        value_vars=['required_spend', 'required_spend_curve'],
+                                        var_name='method',
+                                        value_name='required_spend_value',
+                                    )
+                                    plot_melt['method'] = plot_melt['method'].map({
+                                        'required_spend': 'Linear (avg CPL)',
+                                        'required_spend_curve': 'Curve-based',
+                                    })
+                                    req_fig = px.bar(
+                                        plot_melt,
+                                        x='group',
+                                        y='required_spend_value',
+                                        color='method',
+                                        barmode='group',
+                                        title='Required spend for target DCFS (linear vs curve-based)',
+                                    )
+                                    req_fig.update_layout(
+                                        xaxis_title=group_by or 'Group',
+                                        yaxis_title='Required spend',
+                                        legend_title_text='Method',
+                                    )
+                                    st.plotly_chart(req_fig, use_container_width=True)
+                                required_spend_map = {
+                                    str(row['group']): float(row['required_spend'])
+                                    for _, row in targets_df.dropna(subset=['required_spend']).iterrows()
+                                }
+                                st.session_state['required_spend_map'] = required_spend_map
 
                     current_groups = list(fit_params.keys())
                     min_df = pd.DataFrame({
@@ -4706,8 +4766,11 @@ if page == 'Risk Analysis':
                 fig.update_xaxes(categoryorder='array', categoryarray=group_order)
             fig.update_layout(yaxis_title='Media Spend')
             st.plotly_chart(fig, use_container_width=True)
-            if st.button('Generate spend distribution report', key='spend_distribution_report'):
-                st.info('Coming soon...')
+            zone_counts = pd.Series(zones_by_group).value_counts().to_dict() if zones_by_group else {}
+            st.caption(
+                f"Spend zones: Growth={zone_counts.get('GROWTH', 0)}, "
+                f"Mid={zone_counts.get('MID', 0)}, Saturated={zone_counts.get('SATURATED', 0)}."
+            )
 
         st.subheader('Predictability')
         with st.popover('What is this?'):
@@ -4764,8 +4827,11 @@ if page == 'Risk Analysis':
                 fig.add_hline(y=vol_high, line_dash='dash', line_color='#ff7f0e', annotation_text='HIGH')
                 fig.update_yaxes(title_text='Volatility (IQR / median)')
                 st.plotly_chart(fig, use_container_width=True)
-                if st.button('Generate predictability report', key='predictability_report'):
-                    st.info('Coming soon...')
+                _top_risk = vol_agg.sort_values('volatility', ascending=False).iloc[0]
+                st.caption(
+                    f"Predictability risk: {str(_top_risk['group'])} has the highest volatility "
+                    f"({float(_top_risk['volatility']):.2f})."
+                )
 
         st.subheader('Opportunity score')
         with st.popover('What is this?'):
@@ -4797,13 +4863,22 @@ if page == 'Risk Analysis':
             fig.update_traces(texttemplate='%{text:.0f}', textposition='outside')
             fig.update_yaxes(title_text='Opportunity score (0–100)', range=[0, 110])
             st.plotly_chart(fig, use_container_width=True)
-            if st.button('Generate opportunity score report', key='opportunity_report'):
-                st.info('Coming soon...')
+            _best_opp = opp_agg.sort_values('opportunity_score', ascending=False).iloc[0]
+            st.caption(
+                f"Top opportunity right now: {str(_best_opp['group'])} with score "
+                f"{float(_best_opp['opportunity_score']):.0f}/100."
+            )
 
-        st.subheader('Conclusion and budget strategy')
-        st.caption('LLM conclusion (wireframe)')
-        if st.button('Generate final conclusion', key='final_conclusion'):
-            st.info('Coming soon...')
+        st.subheader('Stage 4 - Planner conclusion and next action')
+        if not opp_df.empty:
+            top_opp = opp_agg.sort_values('opportunity_score', ascending=False).iloc[0]
+            planner_conclusion = (
+                f"Prioritize {str(top_opp['group'])} first (opportunity {float(top_opp['opportunity_score']):.0f}/100), "
+                "then confirm allocation in the Optimal budget split table using your constraint settings."
+            )
+        else:
+            planner_conclusion = 'No opportunity scores are available for the current filters.'
+        st.info(planner_conclusion)
 
     st.caption('Headroom is based on median CPL of the most recent 3 valid periods vs. historical P25 CPL.')
 
