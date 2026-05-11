@@ -5,7 +5,7 @@ MARKET ?= all
 FOLDER ?= market_forms
 RESPONSES ?= market_forms
 OUTFILE ?= utm_consolidated.xlsx
-ADDRESSBOOK ?= UTM_data/PHD_Local_Market_Addressbook.csv
+ADDRESSBOOK ?= /Users/ali.malek/repos/Intelligence-Hub/UTM_data/market_email_contacts_main.csv
 DEADLINE ?= Friday, 09 May 2026
 CC ?=
 
@@ -75,6 +75,13 @@ utm-consolidate:
 #   make utm-email-drafts FOLDER=market_forms_apr ADDRESSBOOK=UTM_data/PHD_Local_Market_Addressbook.csv DEADLINE="Friday, 09 May 2026" CC="a@x.com;b@y.com"
 utm-email-drafts:
 	./.venv/bin/python UTM_data/build_market_email_drafts.py --forms-folder "UTM_data/$(FOLDER)" --addressbook-csv "$(ADDRESSBOOK)" --deadline "$(DEADLINE)" --cc "$(CC)"
+
+# Generate all market forms and create email drafts
+# Usage:
+#   make utm-full FOLDER=market_forms_new
+utm-full:
+	$(MAKE) utm-forms MARKET=all FOLDER=$(FOLDER)
+	$(MAKE) utm-email-drafts FOLDER=$(FOLDER)
 
 # Run market clustering analysis using reverse-funnel targets
 cluster-analysis:
