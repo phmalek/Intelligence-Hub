@@ -16,6 +16,9 @@ class Contact:
     section: str
     name: str
     email: str
+    market_label: str = ""
+    deadline: str = ""
+    cc_emails: str = ""
 
 
 DEFAULT_TO_SECTIONS = ["Market Key Contact", "PAG Client Contact", "PlanIt Champion"]
@@ -56,17 +59,44 @@ def read_contacts(addressbook_csv: Path) -> list[Contact]:
     with addressbook_csv.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            email = (row.get("email") or "").strip()
-            if not email:
+            market_code = (row.get("market") or row.get("market_code") or "").strip()
+            if not market_code:
                 continue
-            contacts.append(
-                Contact(
-                    market=(row.get("market") or "").strip(),
-                    section=(row.get("section") or "").strip(),
-                    name=(row.get("name") or "").strip(),
-                    email=email,
+            market_label = (row.get("market_label") or market_code).strip()
+            to_names = split_multi(row.get("to_names", ""))
+            to_emails = split_multi(row.get("to_emails", ""))
+            cc_emails = split_multi(row.get("cc_emails", ""))
+            deadline = (row.get("deadline") or "").strip()
+            for idx, email in enumerate(to_emails):
+                email = email.strip()
+                if not email:
+                    continue
+                contacts.append(
+                    Contact(
+                        market=market_code,
+                        section="Market Key Contact",
+                        name=to_names[idx].strip() if idx < len(to_names) else "",
+                        email=email,
+                        market_label=market_label,
+                        deadline=deadline,
+                        cc_emails=";".join(cc_emails),
+                    )
                 )
-            )
+            for email in cc_emails:
+                email = email.strip()
+                if not email:
+                    continue
+                contacts.append(
+                    Contact(
+                        market=market_code,
+                        section="PlanIt Champion",
+                        name="",
+                        email=email,
+                        market_label=market_label,
+                        deadline=deadline,
+                        cc_emails=";".join(cc_emails),
+                    )
+                )
     return contacts
 
 
@@ -112,7 +142,7 @@ def pick_recipients(
     aliases: dict[str, str],
     to_sections: list[str],
     cc_sections: list[str],
-) -> tuple[list[tuple[str, str]], list[tuple[str, str]], str]:
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]], str, str, list[str]]:
     market_key = normalize_key(market_code)
     contacts = contacts_by_market.get(market_key, [])
 
@@ -128,7 +158,9 @@ def pick_recipients(
                 contacts = v
                 break
 
-    selected_market_label = contacts[0].market if contacts else market_code
+    selected_market_label = contacts[0].market_label if contacts and contacts[0].market_label else market_code
+    selected_deadline = contacts[0].deadline if contacts else ""
+    selected_cc_emails = split_multi(contacts[0].cc_emails) if contacts else []
 
     to_list: list[tuple[str, str]] = []
     for section in to_sections:
@@ -156,12 +188,16 @@ def pick_recipients(
     to_emails = {e.lower() for _, e in to_list}
     cc_list = [(n, e) for n, e in cc_list if e.lower() not in to_emails]
 
-    return to_list, cc_list, selected_market_label
+    return to_list, cc_list, selected_market_label, selected_deadline, selected_cc_emails
 
 
 def format_addresses(items: list[tuple[str, str]]) -> str:
     formatted = []
     for name, email in items:
+        name = (name or "").strip()
+        email = (email or "").strip()
+        if not email:
+            continue
         if name:
             formatted.append(f"{name} <{email}>")
         else:
@@ -185,14 +221,18 @@ def build_body(first_name: str, market_label: str, deadline: str) -> str:
         "- provide concise response summary and action plan\n"
         "- add response owner name/email and target date\n"
         "- indicate where central support is needed\n\n"
-        f"Please return the completed file by {deadline}.\n\n"
+        f"Please return the completed file by **{deadline}**.\n\n"
+        "Important: We appreciate if you put all responses directly on the attached sheet, so we can prepare the report timely for the client. "
+        "Please do not add any comments or text in the email body or thread, as this disrupts structural processing. "
+        "Only reply to this email if there is something that absolutely requires clarification; otherwise, simply attach the completed sheet and send it back.\n\n"
         "Notes:\n"
         "- do not rename sheets or columns\n"
         "- use dropdown values where available\n"
         "- keep one clear response per prefilled issue row\n\n"
         "Thank you for the support.\n\n"
-        "Best regards,\n"
-        "Ali\n"
+        "Best regards,\n\n"
+        "Ali Malek\n"
+        "Global Media Data Intelligence Lead - Porsche Account\n"
     )
 
 
@@ -205,10 +245,12 @@ def write_eml(
     attachment_file: Path,
 ):
     msg = EmailMessage()
-    msg["To"] = to_addresses
-    if cc_addresses:
-        msg["Cc"] = cc_addresses
+    # Parse and validate email addresses
+    msg["To"] = to_addresses.strip() if to_addresses else ""
+    if cc_addresses and cc_addresses.strip():
+        msg["Cc"] = cc_addresses.strip()
     msg["Subject"] = subject
+    msg["From"] = "ali.malek@omc.com"
     msg.set_content(body)
 
     content = attachment_file.read_bytes()
@@ -242,9 +284,10 @@ def build_drafts(
             continue
         market_code = parse_market_code_from_filename(file.name)
         if not market_code:
+            print(f"[skip] Could not parse market code from {file.name}")
+            skipped += 1
             continue
-
-        to_list, cc_list, market_label = pick_recipients(
+        to_list, cc_list, market_label, market_deadline, market_cc_emails = pick_recipients(
             market_code=market_code,
             contacts_by_market=contacts_by_market,
             aliases=aliases,
@@ -256,16 +299,18 @@ def build_drafts(
             skipped += 1
             continue
 
-        to_name = to_list[0][0] or market_label
-        first_name = to_name.split()[0] if to_name else "Team"
+        # Get all names from to_list and join with commas
+        names = [name.strip() for name, _ in to_list if name]
+        greeting_names = ", ".join(names) if names else market_label
         to_addresses = format_addresses(to_list)
 
         extra_cc_pairs = [("", email.strip()) for email in cc_extra if email.strip()]
-        cc_list = dedupe_emails(cc_list + extra_cc_pairs)
+        cc_list = dedupe_emails(cc_list + extra_cc_pairs + [("", email) for email in market_cc_emails])
         cc_addresses = format_addresses(cc_list)
 
-        subject = build_subject(market_label, deadline)
-        body = build_body(first_name, market_label, deadline)
+        effective_deadline = market_deadline or deadline
+        subject = build_subject(market_label, effective_deadline)
+        body = build_body(greeting_names, market_label, effective_deadline)
         eml_file = forms_folder / f"{market_code}_UTM_Request.eml"
         write_eml(
             eml_path=eml_file,
@@ -301,7 +346,7 @@ def parse_args() -> argparse.Namespace:
         "--deadline",
         type=str,
         default="Friday, 09 May 2026",
-        help="Deadline text shown in subject/body.",
+        help="Default deadline text if not in addressbook.",
     )
     parser.add_argument(
         "--cc",

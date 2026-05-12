@@ -1,0 +1,132 @@
+market,model,ctg_measure,ctg_channel,start_date,end_date,channel_role
+PCGB,Macan BEV,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PD,Macan BEV,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PKO,Macan BEV,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+POF,Macan BEV,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PIT,Macan BEV,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+TRK,Macan BEV,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PCL,Macan BEV,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PIB SPA,Macan BEV,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PNO,Macan BEV,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PIB POR,Macan BEV,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PCH,Macan BEV,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PTW,Macan BEV,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PCA,Macan BEV,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PPL,Macan BEV,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PCGB,Macan BEV,Google Inventory Ads,Google Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PKO,Macan BEV,Google Inventory Ads,Google Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+POF,Macan BEV,Google Inventory Ads,Google Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PIT,Macan BEV,Google Inventory Ads,Google Inventory Ads,2026-06-01,2026-08-30,lower_funnel
+PCL,Macan BEV,Google Inventory Ads,Google Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PIB SPA,Macan BEV,Google Inventory Ads,Google Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PCGB,Macan BEV,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PD,Macan BEV,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PKO,Macan BEV,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+POF,Macan BEV,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PIT,Macan BEV,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+TRK,Macan BEV,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PCL,Macan BEV,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PIB SPA,Macan BEV,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PNO,Macan BEV,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PIB POR,Macan BEV,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PCH,Macan BEV,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PTW,Macan BEV,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PCA,Macan BEV,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PPL,Macan BEV,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PCGB,Macan BEV,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PD,Macan BEV,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PKO,Macan BEV,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+POF,Macan BEV,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PIT,Macan BEV,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+TRK,Macan BEV,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PCL,Macan BEV,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PIB SPA,Macan BEV,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PNO,Macan BEV,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PIB POR,Macan BEV,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PCH,Macan BEV,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PTW,Macan BEV,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PCA,Macan BEV,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PPL,Macan BEV,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PCGB,Cayenne E3 II,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PD,Cayenne E3 II,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PKO,Cayenne E3 II,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+POF,Cayenne E3 II,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PIT,Cayenne E3 II,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+TRK,Cayenne E3 II,Google Ads,Google Ads,2026-06-01,2026-08-30,lower_funnel
+PCL,Cayenne E3 II,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PTW,Cayenne E3 II,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PCA,Cayenne E3 II,Google Ads,Google Ads,2026-06-01,2026-08-30,lower_funnel
+PPL,Cayenne E3 II,Google Ads,Google Ads,2026-06-01,2026-08-30,lower_funnel
+PCGB,Cayenne E3 II,Google Inventory Ads,Google Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PKO,Cayenne E3 II,Google Inventory Ads,Google Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+POF,Cayenne E3 II,Google Inventory Ads,Google Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PIT,Cayenne E3 II,Google Inventory Ads,Google Inventory Ads,2026-06-01,2026-08-30,lower_funnel
+PCL,Cayenne E3 II,Google Inventory Ads,Google Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PTW,Cayenne E3 II,Google Inventory Ads,Google Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PCGB,Cayenne E3 II,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PD,Cayenne E3 II,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PKO,Cayenne E3 II,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+POF,Cayenne E3 II,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PIT,Cayenne E3 II,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+TRK,Cayenne E3 II,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PCL,Cayenne E3 II,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PTW,Cayenne E3 II,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PCA,Cayenne E3 II,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PPL,Cayenne E3 II,META Inventory Ads,META Inventory Ads,2026-05-01,2026-08-30,lower_funnel
+PCGB,Cayenne E3 II,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PD,Cayenne E3 II,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PKO,Cayenne E3 II,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PIT,Cayenne E3 II,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+TRK,Cayenne E3 II,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PCL,Cayenne E3 II,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PTW,Cayenne E3 II,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PCA,Cayenne E3 II,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PPL,Cayenne E3 II,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PCGB,Cayenne E4,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PD,Cayenne E4,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PKO,Cayenne E4,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+POF,Cayenne E4,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PIT,Cayenne E4,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+TRK,Cayenne E4,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PCL,Cayenne E4,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PIB SPA,Cayenne E4,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PNO,Cayenne E4,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PIB POR,Cayenne E4,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PCH,Cayenne E4,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PTW,Cayenne E4,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PCA,Cayenne E4,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PPL,Cayenne E4,Google Ads,Google Ads,2026-05-01,2026-08-30,lower_funnel
+PCGB,Cayenne E4,Google Inventory Ads,Google Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PKO,Cayenne E4,Google Inventory Ads,Google Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+POF,Cayenne E4,Google Inventory Ads,Google Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PIT,Cayenne E4,Google Inventory Ads,Google Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PCL,Cayenne E4,Google Inventory Ads,Google Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PIB SPA,Cayenne E4,Google Inventory Ads,Google Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PCGB,Cayenne E4,META Inventory Ads,META Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PD,Cayenne E4,META Inventory Ads,META Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PKO,Cayenne E4,META Inventory Ads,META Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+POF,Cayenne E4,META Inventory Ads,META Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PIT,Cayenne E4,META Inventory Ads,META Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+TRK,Cayenne E4,META Inventory Ads,META Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PCL,Cayenne E4,META Inventory Ads,META Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PIB SPA,Cayenne E4,META Inventory Ads,META Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PNO,Cayenne E4,META Inventory Ads,META Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PIB POR,Cayenne E4,META Inventory Ads,META Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PCH,Cayenne E4,META Inventory Ads,META Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PTW,Cayenne E4,META Inventory Ads,META Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PCA,Cayenne E4,META Inventory Ads,META Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PPL,Cayenne E4,META Inventory Ads,META Inventory Ads,2026-07-01,2026-08-30,lower_funnel
+PCGB,Cayenne E4,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PD,Cayenne E4,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PKO,Cayenne E4,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+POF,Cayenne E4,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PIT,Cayenne E4,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+TRK,Cayenne E4,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PCL,Cayenne E4,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PIB SPA,Cayenne E4,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PNO,Cayenne E4,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PIB POR,Cayenne E4,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PCH,Cayenne E4,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PTW,Cayenne E4,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PCA,Cayenne E4,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel
+PPL,Cayenne E4,Paid Social,Paid Social,2026-07-01,2026-08-30,upper_funnel

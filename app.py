@@ -55,6 +55,14 @@ UTM_NOTES_CSV_PATH = BASE_DIR / 'UTM_data' / 'Porsche_UTM Adoption Notes_Feb2026
 ADDRESSBOOK_CSV_PATH = BASE_DIR / 'UTM_data' / 'PHD_Local_Market_Addressbook.csv'
 UTM_OUTREACH_DB_PATH = BASE_DIR / 'UTM_data' / 'outreach_tracking.db'
 TAXONOMY_HYGIENE_PATH = BASE_DIR / 'taxonomy_hygine' / 'Copy of VWG Taxonomy Output v1.3 8 Apr 2026 11 30 07.xlsx'
+MARKET_ACTIVITY_DIR = BASE_DIR / 'market_activities'
+MARKET_ACTIVITY_SIGNALS_PATH = MARKET_ACTIVITY_DIR / 'market_activity_weekly_signals.csv'
+MARKET_ACTIVITY_LOCAL_PATH = MARKET_ACTIVITY_DIR / 'local_activity_normalized.csv'
+MARKET_ACTIVITY_CTG_PATH = MARKET_ACTIVITY_DIR / 'ctg_timeline_normalized.csv'
+MARKET_ACTIVITY_CHANNEL_TAXONOMY_PATH = MARKET_ACTIVITY_DIR / 'channel_taxonomy_day2.csv'
+BUDGET_REALLOCATION_DIR = BASE_DIR / 'budget_reallocation'
+BUDGET_REALLOCATION_RECOMMENDATIONS_PATH = BUDGET_REALLOCATION_DIR / 'budget_reallocation_recommendations.csv'
+BUDGET_REALLOCATION_PERFORMANCE_PATH = BUDGET_REALLOCATION_DIR / 'market_performance_summary.csv'
 MANUAL_UTM_TEST_RECORDS = [
     {
         'market_code': 'test_market',
@@ -103,6 +111,25 @@ def load_taxonomy_hygiene_workbook(path_str: str) -> pd.DataFrame:
 def run_taxonomy_hygiene_analysis(path_str: str) -> dict:
     df_tax = load_taxonomy_hygiene_workbook(path_str)
     return build_taxonomy_analysis(df_tax)
+
+
+@st.cache_data(show_spinner=False)
+def load_market_activity_outputs(signals_path: str, local_path: str, ctg_path: str, signals_mtime: float, local_mtime: float, ctg_mtime: float):
+    signals_df = pd.read_csv(signals_path)
+    local_df = pd.read_csv(local_path)
+    ctg_df = pd.read_csv(ctg_path)
+    for data in [signals_df, local_df, ctg_df]:
+        for col in ['week_start', 'start_date', 'end_date']:
+            if col in data.columns:
+                data[col] = pd.to_datetime(data[col], errors='coerce')
+    return signals_df, local_df, ctg_df
+
+
+@st.cache_data(show_spinner=False)
+def load_budget_reallocation_outputs(recs_path: str, perf_path: str, recs_mtime: float, perf_mtime: float):
+    recs_df = pd.read_csv(recs_path)
+    perf_df = pd.read_csv(perf_path)
+    return recs_df, perf_df
 
 
 def format_meur(value: float) -> str:
@@ -2839,6 +2866,8 @@ with st.sidebar:
             'Market Report - Excel Export',
             'KPI vs Investment',
             'Market Alignments',
+            'CTG Market Activity',
+            'Budget Reallocation',
             'UTM Adoption',
             'Taxonomy Hygiene',
             'Budget Setting Sankey',
@@ -3102,6 +3131,24 @@ with st.sidebar:
         campaign = None
         top_n = None
     elif page == 'Market Alignments':
+        metric = None
+        agg_func = None
+        filtered = None
+        model_df = None
+        market = None
+        campaign = None
+        top_n = None
+        kpi_filters = None
+    elif page == 'CTG Market Activity':
+        metric = None
+        agg_func = None
+        filtered = None
+        model_df = None
+        market = None
+        campaign = None
+        top_n = None
+        kpi_filters = None
+    elif page == 'Budget Reallocation':
         metric = None
         agg_func = None
         filtered = None
@@ -5852,6 +5899,349 @@ if page == 'Market Alignments':
         key='market_addressbook_editor',
     )
     st.session_state['market_addressbook'] = addressbook_df
+    st.stop()
+
+if page == 'CTG Market Activity':
+    st.subheader('CTG Market Activity')
+    st.caption('Weekly overlay of Nico market activity plans against CTG planned channel activity.')
+
+    required_paths = [
+        MARKET_ACTIVITY_SIGNALS_PATH,
+        MARKET_ACTIVITY_LOCAL_PATH,
+        MARKET_ACTIVITY_CTG_PATH,
+    ]
+    missing_paths = [path for path in required_paths if not path.exists()]
+    if missing_paths:
+        st.warning('Market activity outputs have not been generated yet.')
+        st.code('.venv/bin/python market_activities/build_day1_market_activity.py')
+        st.write('Missing files:')
+        for path in missing_paths:
+            st.write(f'- `{path}`')
+        st.stop()
+
+    signals_df, local_activity_df, ctg_activity_df = load_market_activity_outputs(
+        str(MARKET_ACTIVITY_SIGNALS_PATH),
+        str(MARKET_ACTIVITY_LOCAL_PATH),
+        str(MARKET_ACTIVITY_CTG_PATH),
+        MARKET_ACTIVITY_SIGNALS_PATH.stat().st_mtime,
+        MARKET_ACTIVITY_LOCAL_PATH.stat().st_mtime,
+        MARKET_ACTIVITY_CTG_PATH.stat().st_mtime,
+    )
+
+    for col in ['ctg_channels', 'local_channels', 'recommended_action', 'model', 'market']:
+        if col in signals_df.columns:
+            signals_df[col] = signals_df[col].fillna('').astype(str)
+
+    filters = st.columns([1.1, 1.1, 1.2, 1.2, 1.1])
+    with filters[0]:
+        market_options = ['All'] + sorted(signals_df['market'].dropna().unique())
+        selected_markets = st.multiselect('Markets', market_options, default=['All'], key='ctg_market_activity_markets')
+    with filters[1]:
+        model_options = ['All'] + sorted(signals_df['model'].dropna().unique())
+        selected_models = st.multiselect('Models', model_options, default=['All'], key='ctg_market_activity_models')
+    with filters[2]:
+        action_options = ['All'] + sorted(signals_df['recommended_action'].dropna().unique())
+        selected_actions = st.multiselect('Signals', action_options, default=['All'], key='ctg_market_activity_actions')
+    with filters[3]:
+        bucket_options = ['All'] + sorted(signals_df['planning_bucket'].dropna().unique()) if 'planning_bucket' in signals_df.columns else ['All']
+        selected_buckets = st.multiselect('Planning Buckets', bucket_options, default=['All'], key='ctg_market_activity_buckets')
+    with filters[4]:
+        min_week = signals_df['week_start'].min()
+        max_week = signals_df['week_start'].max()
+        week_range = st.date_input(
+            'Week range',
+            value=(min_week.date(), max_week.date()),
+            min_value=min_week.date(),
+            max_value=max_week.date(),
+            key='ctg_market_activity_weeks',
+        )
+
+    activity_view = signals_df.copy()
+    if selected_markets and 'All' not in selected_markets:
+        activity_view = activity_view[activity_view['market'].isin(selected_markets)]
+    if selected_models and 'All' not in selected_models:
+        activity_view = activity_view[activity_view['model'].isin(selected_models)]
+    if selected_actions and 'All' not in selected_actions:
+        activity_view = activity_view[activity_view['recommended_action'].isin(selected_actions)]
+    if selected_buckets and 'All' not in selected_buckets and 'planning_bucket' in activity_view.columns:
+        activity_view = activity_view[activity_view['planning_bucket'].isin(selected_buckets)]
+    if isinstance(week_range, tuple) and len(week_range) == 2:
+        start_date, end_date = week_range
+        activity_view = activity_view[
+            (activity_view['week_start'].dt.date >= start_date)
+            & (activity_view['week_start'].dt.date <= end_date)
+        ]
+
+    metric_cols = st.columns(6)
+    with metric_cols[0]:
+        st.metric('Markets', activity_view['market'].nunique())
+    with metric_cols[1]:
+        st.metric('Weekly Rows', f"{len(activity_view):,}")
+    with metric_cols[2]:
+        scale_count = int((activity_view.get('planning_bucket', pd.Series(dtype=str)) == 'Scale').sum()) if 'planning_bucket' in activity_view.columns else 0
+        st.metric('Scale Cases', scale_count)
+    with metric_cols[3]:
+        st.metric('Harvest Signals', int((activity_view['recommended_action'] == 'Harvest local upper-funnel demand').sum()))
+    with metric_cols[4]:
+        validate_count = int((activity_view['recommended_action'] == 'Validate data before optimisation').sum())
+        st.metric('Validate First', validate_count)
+    with metric_cols[5]:
+        follow_up_count = int((local_activity_df['data_quality'].fillna('') != 'complete').sum()) if 'data_quality' in local_activity_df.columns else 0
+        st.metric('Input Rows To Validate', follow_up_count)
+
+    st.markdown('#### Optimisation Signals')
+    chart_left, chart_mid, chart_right = st.columns([1, 1, 1])
+    with chart_left:
+        if 'planning_bucket' in activity_view.columns:
+            bucket_counts = (
+                activity_view.groupby('planning_bucket', dropna=False)
+                .size()
+                .reset_index(name='rows')
+                .sort_values('rows', ascending=True)
+            )
+            if not bucket_counts.empty:
+                fig = px.bar(
+                    bucket_counts,
+                    x='rows',
+                    y='planning_bucket',
+                    orientation='h',
+                    color='planning_bucket',
+                    color_discrete_map={
+                        'Scale': '#2F6B4F',
+                        'Protect': '#375D81',
+                        'Fix': '#D5A021',
+                        'Reduce': '#7C3E3E',
+                        'Watch': '#6E6E6E',
+                    },
+                )
+                fig.update_layout(showlegend=False, height=320, margin=dict(l=10, r=10, t=10, b=10), yaxis_title='')
+                st.plotly_chart(fig, use_container_width=True)
+    with chart_mid:
+        action_counts = (
+            activity_view.groupby('recommended_action', dropna=False)
+            .size()
+            .reset_index(name='rows')
+            .sort_values('rows', ascending=True)
+        )
+        if not action_counts.empty:
+            fig = px.bar(
+                action_counts,
+                x='rows',
+                y='recommended_action',
+                orientation='h',
+                color='recommended_action',
+                color_discrete_map={
+                    'CTG filling local gap': '#D5001C',
+                    'Harvest local upper-funnel demand': '#2F6B4F',
+                    'Coordinated support': '#375D81',
+                    'Potential CTG whitespace': '#D5A021',
+                    'Check duplication before upweighting': '#7C3E3E',
+                },
+            )
+            fig.update_layout(showlegend=False, height=320, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info('No rows match the current filters.')
+
+    with chart_right:
+        weekly_counts = (
+            activity_view.groupby(['week_start', 'recommended_action'], dropna=False)
+            .size()
+            .reset_index(name='rows')
+        )
+        if not weekly_counts.empty:
+            fig = px.area(
+                weekly_counts,
+                x='week_start',
+                y='rows',
+                color='recommended_action',
+                color_discrete_map={
+                    'CTG filling local gap': '#D5001C',
+                    'Harvest local upper-funnel demand': '#2F6B4F',
+                    'Coordinated support': '#375D81',
+                    'Potential CTG whitespace': '#D5A021',
+                    'Check duplication before upweighting': '#7C3E3E',
+                },
+            )
+            fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), legend_title_text='')
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info('No weekly signal trend available.')
+
+    st.markdown('#### Market Heatmap')
+    heat_df = (
+        activity_view.groupby(['market', 'recommended_action'], dropna=False)
+        .size()
+        .reset_index(name='rows')
+    )
+    if not heat_df.empty:
+        fig = px.density_heatmap(
+            heat_df,
+            x='recommended_action',
+            y='market',
+            z='rows',
+            color_continuous_scale='Reds',
+        )
+        fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10), xaxis_title='', yaxis_title='')
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown('#### Weekly Recommendation Rows')
+    display_cols = [
+        'market',
+        'model',
+        'week_start',
+        'planning_bucket',
+        'budget_direction',
+        'confidence_level',
+        'recommended_action',
+        'recommendation_reason',
+        'ctg_channels',
+        'local_channels',
+        'gap_score',
+        'harvest_score',
+        'duplication_score',
+        'local_activity_count',
+        'ctg_activity_count',
+    ]
+    display_cols = [col for col in display_cols if col in activity_view.columns]
+    st.dataframe(
+        activity_view[display_cols].sort_values(['week_start', 'market', 'model']),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    if MARKET_ACTIVITY_CHANNEL_TAXONOMY_PATH.exists():
+        with st.expander('Channel taxonomy', expanded=False):
+            taxonomy_df = pd.read_csv(MARKET_ACTIVITY_CHANNEL_TAXONOMY_PATH)
+            st.dataframe(taxonomy_df, use_container_width=True, hide_index=True)
+
+    st.stop()
+
+if page == 'Budget Reallocation':
+    st.subheader('Budget Reallocation')
+    st.caption('Plain-language weekly budget actions combining observed performance with the CTG market activity layer.')
+
+    required_paths = [
+        BUDGET_REALLOCATION_RECOMMENDATIONS_PATH,
+        BUDGET_REALLOCATION_PERFORMANCE_PATH,
+    ]
+    missing_paths = [path for path in required_paths if not path.exists()]
+    if missing_paths:
+        st.warning('Budget reallocation outputs have not been generated yet.')
+        st.code('python3 budget_reallocation/build_budget_reallocation.py')
+        for path in missing_paths:
+            st.write(f'- `{path}`')
+        st.stop()
+
+    recs_df, perf_df = load_budget_reallocation_outputs(
+        str(BUDGET_REALLOCATION_RECOMMENDATIONS_PATH),
+        str(BUDGET_REALLOCATION_PERFORMANCE_PATH),
+        BUDGET_REALLOCATION_RECOMMENDATIONS_PATH.stat().st_mtime,
+        BUDGET_REALLOCATION_PERFORMANCE_PATH.stat().st_mtime,
+    )
+
+    for col in ['market', 'model_family', 'final_budget_action', 'performance_bucket', 'activity_top_signal']:
+        if col in recs_df.columns:
+            recs_df[col] = recs_df[col].fillna('').astype(str)
+
+    filter_cols = st.columns([1.2, 1.2, 1.4])
+    with filter_cols[0]:
+        action_options = ['All'] + sorted(recs_df['final_budget_action'].dropna().unique())
+        selected_actions = st.multiselect('Budget Actions', action_options, default=['All'], key='budget_reallocation_actions')
+    with filter_cols[1]:
+        market_options = ['All'] + sorted(recs_df['market'].dropna().unique())
+        selected_markets = st.multiselect('Markets', market_options, default=['All'], key='budget_reallocation_markets')
+    with filter_cols[2]:
+        model_options = ['All'] + sorted(recs_df['model_family'].dropna().unique())
+        selected_models = st.multiselect('Model Families', model_options, default=['All'], key='budget_reallocation_models')
+
+    view = recs_df.copy()
+    if selected_actions and 'All' not in selected_actions:
+        view = view[view['final_budget_action'].isin(selected_actions)]
+    if selected_markets and 'All' not in selected_markets:
+        view = view[view['market'].isin(selected_markets)]
+    if selected_models and 'All' not in selected_models:
+        view = view[view['model_family'].isin(selected_models)]
+
+    metrics = st.columns(6)
+    for idx, action in enumerate(['Increase', 'Protect', 'Test', 'Fix', 'Watch', 'Reduce']):
+        with metrics[idx]:
+            st.metric(action, int((view['final_budget_action'] == action).sum()))
+
+    st.markdown('#### Budget Action Mix')
+    left, right = st.columns([1, 1.2])
+    with left:
+        action_counts = (
+            view.groupby('final_budget_action', dropna=False)
+            .size()
+            .reset_index(name='rows')
+            .sort_values('rows', ascending=True)
+        )
+        if not action_counts.empty:
+            fig = px.bar(
+                action_counts,
+                x='rows',
+                y='final_budget_action',
+                orientation='h',
+                color='final_budget_action',
+                color_discrete_map={
+                    'Increase': '#2F6B4F',
+                    'Protect': '#375D81',
+                    'Test': '#D5A021',
+                    'Fix': '#C45A3A',
+                    'Watch': '#6E6E6E',
+                    'Reduce': '#7C3E3E',
+                },
+            )
+            fig.update_layout(showlegend=False, height=340, margin=dict(l=10, r=10, t=10, b=10), yaxis_title='')
+            st.plotly_chart(fig, use_container_width=True)
+    with right:
+        perf_counts = (
+            view.groupby(['performance_bucket', 'final_budget_action'], dropna=False)
+            .size()
+            .reset_index(name='rows')
+        )
+        if not perf_counts.empty:
+            fig = px.bar(
+                perf_counts,
+                x='performance_bucket',
+                y='rows',
+                color='final_budget_action',
+                barmode='stack',
+                color_discrete_map={
+                    'Increase': '#2F6B4F',
+                    'Protect': '#375D81',
+                    'Test': '#D5A021',
+                    'Fix': '#C45A3A',
+                    'Watch': '#6E6E6E',
+                    'Reduce': '#7C3E3E',
+                },
+            )
+            fig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), xaxis_title='', legend_title_text='')
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown('#### Recommendation Rows')
+    display_cols = [
+        'market',
+        'model_family',
+        'final_budget_action',
+        'final_reason',
+        'performance_bucket',
+        'activity_top_signal',
+        'recent_spend',
+        'recent_dcfs',
+        'recent_cpl_dcfs',
+        'dcfs_trend_vs_previous_4w',
+        'harvest_weeks',
+        'gap_fill_weeks',
+        'validate_weeks',
+    ]
+    display_cols = [col for col in display_cols if col in view.columns]
+    st.dataframe(view[display_cols], use_container_width=True, hide_index=True)
+
+    with st.expander('Observed performance summary', expanded=False):
+        st.dataframe(perf_df, use_container_width=True, hide_index=True)
+
     st.stop()
 
 if page == 'UTM Adoption':

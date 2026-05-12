@@ -1,0 +1,20 @@
+raw_channel,normalized_channel,role
+Brand Days,Brand Days,upper_funnel
+Branded Content,Branded Content,upper_funnel
+CTV,CTV,upper_funnel
+Cinemas,Cinemas,upper_funnel
+TV and cinema,Cinemas,upper_funnel
+DOOH,DOOH,upper_funnel
+Display,Display,lower_funnel
+Google Ads,Google Ads,lower_funnel
+Google Inventory Ads,Google Inventory Ads,lower_funnel
+META Inventory Ads,META Inventory Ads,lower_funnel
+Other Online Channel,Other Online Channel,upper_funnel
+Paid Social,Paid Social,upper_funnel
+Programmatic,Programmatic,upper_funnel
+Webmotors (Brazil’s largest automotive marketplace),Retail Marketplace,lower_funnel
+Webmotors - Brazil’s largest automotive marketplace,Retail Marketplace,lower_funnel
+Search,Search,lower_funnel
+Social,Social,upper_funnel
+Streaming TV,Streaming TV,upper_funnel
+YouTube,YouTube,upper_funnel
